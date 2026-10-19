@@ -142,11 +142,16 @@ export class SfCli {
   }
 
   async text(args: string[], opts: SfRunOptions): Promise<string> {
+    return (await this.textWithStderr(args, opts)).stdout;
+  }
+
+  /** Like text() but also returns (redacted) stderr, where the CLI reports warnings such as engine parse errors. */
+  async textWithStderr(args: string[], opts: SfRunOptions): Promise<{ stdout: string; stderr: string }> {
     const res = await this.exec(args, { ...opts, plain: true });
     if (res.exitCode !== 0) {
       throw new SfError('SF_ERROR', redact(res.stderr.trim() || `Command exited with code ${res.exitCode}`));
     }
-    return res.stdout.trim();
+    return { stdout: res.stdout.trim(), stderr: redact(res.stderr) };
   }
 
   private async exec(args: string[], opts: SfRunOptions): Promise<RunResult> {

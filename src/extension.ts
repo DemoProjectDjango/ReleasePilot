@@ -1,9 +1,13 @@
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { CommandHistory } from './adapters/commandHistory';
 import { GitAdapter } from './adapters/git';
 import { NodeProcessRunner } from './adapters/processRunner';
 import { SfCli, SfError, resolveSfLauncher } from './adapters/sfCli';
+import { SeverityGate, applyFix, gateBlockers } from './analysis/analyzer';
+import { TriageStore } from './analysis/triage';
 import { Logger } from './core/logger';
 import { StepId } from './core/models';
 import { DiscoveryService } from './discovery/discoveryService';
@@ -11,16 +15,25 @@ import { RetrievalService } from './discovery/retrieval';
 import { FileStateStore } from './engine/stateStore';
 import { WorkflowEngine } from './engine/workflowEngine';
 import { createExecutors } from './executors/executors';
+import { QualitySettings, createQualityExecutors } from './executors/quality';
 import { ReportWriter } from './executors/reportWriter';
+import { TestLevel, evaluateApex, runApexTests } from './testing/apex';
+import { QualityStore } from './testing/qualityStore';
+import { buildSummaryMarkdown } from './testing/summary';
 import { DashboardPanel } from './ui/dashboardPanel';
 import { WebviewMessage } from './ui/messages';
 import { PipelineTree, StepItem } from './ui/pipelineTree';
 
+const FIX_SCHEME = 'releasepilot-fix';
+
 export function activate(context: vscode.ExtensionContext): void {
   const cfg = () => vscode.workspace.getConfiguration('releasepilot');
   const storageDir = (context.storageUri ?? context.globalStorageUri).fsPath;
+  const reportsDir = path.join(storageDir, 'reports');
   const store = new FileStateStore(path.join(storageDir, 'workflow-state.json'));
-  const reports = new ReportWriter(path.join(storageDir, 'reports'));
+  const reports = new ReportWriter(reportsDir);
+  const quality = new QualityStore(path.join(storageDir, 'quality-state.json'));
+  const triage = new TriageStore(path.join(storageDir, 'triage.json'));
 
   const output = vscode.window.createOutputChannel('ReleasePilot');
   context.subscriptions.push(output);
@@ -42,12 +55,30 @@ export function activate(context: vscode.ExtensionContext): void {
     const saved = context.workspaceState.get<string>('releasepilot.root');
     return saved && folders().includes(saved) ? saved : folders()[0];
   };
-
   const trusted = () => vscode.workspace.isTrusted;
+
+  const qualitySettings = (): QualitySettings => ({
+    ruleSelectors: cfg().get<string[]>('ruleSelectors', ['Recommended']),
+    severityGate: cfg().get<SeverityGate>('severityGate', 'high'),
+    testLevel: cfg().get<TestLevel>('testLevel', 'RunLocalTests'),
+    deployBeforeTests: cfg().get<boolean>('deployBeforeTests', true),
+    waitMinutes: cfg().get<number>('testWaitMinutes', 60),
+    coverageTargetPercent: cfg().get<number>('coverageTargetPercent', 80)
+  });
+
+  const confirmRemote = async (title: string, detail: string): Promise<boolean> =>
+    (await vscode.window.showWarningMessage(title, { modal: true, detail }, 'Continue')) === 'Continue';
+
   const engine = new WorkflowEngine({
     store,
     logger,
-    executors: createExecutors({ discovery, reports, getRoot, allowDirtySource: () => cfg().get<boolean>('allowDirtySource', false) }),
+    executors: {
+      ...createExecutors({ discovery, reports, getRoot, allowDirtySource: () => cfg().get<boolean>('allowDirtySource', false) }),
+      ...createQualityExecutors({
+        sf, runner, discovery, reports, reportsDir, quality, triage, getRoot,
+        settings: qualitySettings, git: root => git.snapshot(root), confirm: confirmRemote
+      })
+    },
     canExecute: () => trusted() ? { allowed: true } : { allowed: false, reason: 'Running workflow steps requires a trusted workspace.' },
     stepTimeoutMs: cfg().get<number>('stepTimeoutMinutes', 60) * 60_000
   });
@@ -56,9 +87,16 @@ export function activate(context: vscode.ExtensionContext): void {
   const tree = new PipelineTree(engine);
   context.subscriptions.push(vscode.window.registerTreeDataProvider('releasepilot.pipeline', tree));
 
+  // Read-only virtual documents used to show the proposed side of a fix diff.
+  const proposed = new Map<string, string>();
+  context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(FIX_SCHEME, {
+    provideTextDocumentContent: uri => proposed.get(uri.toString()) ?? ''
+  }));
+
   // ---- view model --------------------------------------------------------
   let busy: string | undefined;
   let notice: { level: 'info' | 'error'; text: string } | undefined;
+  let lastFingerprint: string | undefined;
   const refreshUi = () => { tree.refresh(); DashboardPanel.refresh(); };
 
   const withBusy = async <T>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
@@ -84,9 +122,32 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  const qualityView = () => {
+    const q = quality.get();
+    const settings = qualitySettings();
+    const triaged = triage.keys();
+    const outdated = (fp?: string) => !!fp && !!lastFingerprint && fp !== lastFingerprint;
+    return {
+      analysis: q.analysis && {
+        ...q.analysis,
+        findings: q.analysis.findings.slice(0, 3000).map(f => ({ ...f, absFile: undefined, triaged: triaged.has(f.key) })),
+        truncated: q.analysis.findings.length > 3000,
+        blockers: gateBlockers(q.analysis.findings, settings.severityGate, triaged).length,
+        outdated: outdated(q.analysis.sourceFingerprint)
+      },
+      apex: q.apex && { ...q.apex, outdated: outdated(q.apex.sourceFingerprint), gate: evaluateApex(q.apex, settings.coverageTargetPercent) },
+      lwc: q.lwc,
+      rerun: q.rerun,
+      triage: triage.list(),
+      gate: settings.severityGate,
+      coverageTarget: settings.coverageTargetPercent
+    };
+  };
+
   const view = () => ({
     discovery: discovery.snapshot,
     retrieval: retrieval.lastPreview,
+    quality: qualityView(),
     busy,
     notice,
     selectedRoot: getRoot(),
@@ -97,14 +158,16 @@ export function activate(context: vscode.ExtensionContext): void {
   let monitorTimer: NodeJS.Timeout | undefined;
   const checkFreshness = async () => {
     const root = getRoot();
-    const source = engine.getState().run.steps.source;
-    if (!root || !trusted() || !source.fingerprint || source.status === 'stale' || busy) {
+    if (!root || !trusted() || busy) {
       return;
     }
     const snap = await git.snapshot(root);
-    if (snap.fingerprint && snap.fingerprint !== source.fingerprint) {
+    lastFingerprint = snap.fingerprint ?? lastFingerprint;
+    const source = engine.getState().run.steps.source;
+    if (snap.fingerprint && source.fingerprint && source.status !== 'stale' && snap.fingerprint !== source.fingerprint) {
       engine.markStale('source', 'local source changed after the snapshot was taken');
     }
+    DashboardPanel.refresh();
   };
   const scheduleFreshness = () => {
     clearTimeout(monitorTimer);
@@ -124,9 +187,152 @@ export function activate(context: vscode.ExtensionContext): void {
     await withBusy('Discovering project and orgs', async () => {
       const before = discovery.snapshot.devHub?.orgId;
       const snap = await discovery.discover(root);
+      lastFingerprint = snap.git?.fingerprint ?? lastFingerprint;
       if (before && snap.devHub?.orgId !== before) {
         engine.markStale('preflight', 'the selected Dev Hub changed');
       }
+    });
+  };
+
+  // ---- helpers for quality actions ----------------------------------------
+  const knownRefs = (): Set<string> => {
+    const refs = new Set<string>();
+    const st = engine.getState();
+    Object.values(st.run.steps).forEach(s => s.evidence.forEach(e => refs.add(e.ref)));
+    (st.artifacts ?? []).forEach(e => refs.add(e.ref));
+    const q = quality.get();
+    [q.analysis?.jsonPath, q.analysis?.htmlPath, q.apex?.rawPath, q.lwc?.rawPath, q.rerun?.rawPath].forEach(r => r && refs.add(r));
+    return refs;
+  };
+  const isInside = (parent: string, child: string) => {
+    const rel = path.relative(parent, child);
+    return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+  const findFinding = (key: string) => quality.get().analysis?.findings.find(f => f.key === key);
+
+  const openFinding = async (key: string) => {
+    const root = getRoot();
+    const f = findFinding(key);
+    if (!root || !f || !f.absFile || !isInside(root, f.absFile) || !fs.existsSync(f.absFile)) {
+      notice = { level: 'error', text: 'That file is not available in the current project. Rescan to refresh the findings.' };
+      refreshUi();
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument(f.absFile);
+    const pos = new vscode.Position(Math.max(f.line - 1, 0), Math.max(f.column - 1, 0));
+    await vscode.window.showTextDocument(doc, { selection: new vscode.Range(pos, pos), preview: false });
+  };
+
+  const openReport = async (ref: string) => {
+    if (!knownRefs().has(ref) || !fs.existsSync(ref)) {
+      notice = { level: 'error', text: 'That report is not a known ReleasePilot artifact.' };
+      refreshUi();
+      return;
+    }
+    if (/\.html?$/i.test(ref)) {
+      await vscode.env.openExternal(vscode.Uri.file(ref));
+    } else {
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(ref), { preview: true });
+    }
+  };
+
+  const exportTo = async (suggested: string, write: (dest: string) => void) => {
+    const dest = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.join(getRoot() ?? os.homedir(), suggested)), saveLabel: 'Export' });
+    if (dest) {
+      write(dest.fsPath);
+      notice = { level: 'info', text: `Exported to ${dest.fsPath}` };
+    }
+  };
+
+  const triageFinding = async (key: string) => {
+    const f = findFinding(key);
+    if (!f) {
+      return;
+    }
+    const reason = await vscode.window.showInputBox({
+      title: `Triage ${f.rule} in ${f.file}:${f.line}`,
+      prompt: 'Why is this a false positive or accepted risk? (min. 10 characters; recorded with your name and the time)',
+      validateInput: v => (v.trim().length < 10 ? 'Please give a justification of at least 10 characters.' : undefined)
+    });
+    if (reason) {
+      triage.add(key, reason, os.userInfo().username);
+      logger.log('warn', 'analysis', `Finding triaged: ${f.rule} ${f.file}:${f.line} (${reason.slice(0, 80)})`);
+      engine.markStale('analysis', 'triage decisions changed');
+    }
+  };
+
+  const reviewAndApplyFix = async (key: string) => {
+    const root = getRoot();
+    const q = quality.get().analysis;
+    const f = findFinding(key);
+    if (!root || !q || !f?.fix || !f.absFile || !isInside(root, f.absFile)) {
+      notice = { level: 'error', text: 'No applicable analyzer fix is available for that finding.' };
+      return;
+    }
+    const current = await git.snapshot(root);
+    if (current.fingerprint !== q.sourceFingerprint) {
+      notice = { level: 'error', text: 'The source changed since the scan. Rescan before applying fixes.' };
+      return;
+    }
+    const uri = vscode.Uri.file(f.absFile);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    let next: string;
+    try {
+      next = applyFix(doc.getText(), f.fix);
+    } catch (e) {
+      notice = { level: 'error', text: e instanceof Error ? e.message : String(e) };
+      return;
+    }
+    const left = uri;
+    const right = vscode.Uri.parse(`${FIX_SCHEME}:/${path.basename(f.absFile)}?${encodeURIComponent(key)}`);
+    proposed.set(right.toString(), next);
+    await vscode.commands.executeCommand('vscode.diff', left, right, `Proposed fix: ${f.rule} (${f.file}:${f.line})`);
+    const pick = await vscode.window.showWarningMessage(
+      `Apply the analyzer's suggested fix for ${f.rule}?`,
+      { modal: true, detail: `${f.message}\n\nReview the diff first. Fixes can change behaviour, especially for security rules; rescan and re-run tests afterwards.` },
+      'Apply Fix');
+    proposed.delete(right.toString());
+    if (pick !== 'Apply Fix') {
+      return;
+    }
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), next);
+    if (await vscode.workspace.applyEdit(edit)) {
+      await doc.save();
+      logger.log('warn', 'analysis', `Applied analyzer fix for ${f.rule} at ${f.file}:${f.line}.`);
+      notice = { level: 'info', text: 'Fix applied. Rescan to confirm; earlier results are now stale.' };
+      scheduleFreshness();
+    }
+  };
+
+  const rerunFailedTests = async () => {
+    const root = getRoot();
+    const org = discovery.snapshot.validationOrg;
+    const apex = quality.get().apex;
+    const failedNames = (apex?.tests ?? []).filter(t => t.outcome !== 'Pass' && t.outcome !== 'Skip').map(t => t.fullName);
+    if (!root || !trusted() || !org || !failedNames.length) {
+      notice = { level: 'error', text: !org ? 'Select a validation org first.' : 'There are no failed tests to rerun.' };
+      refreshUi();
+      return;
+    }
+    if (discovery.snapshot.devHub?.orgId === org.orgId) {
+      notice = { level: 'error', text: 'The validation org must not be the Dev Hub.' };
+      refreshUi();
+      return;
+    }
+    const label = `${org.alias ?? org.username} (${org.orgId})`;
+    if (!await confirmRemote(`Rerun ${failedNames.length} failed test(s) in ${label}?`,
+      'Only the failed tests run, using whatever source is currently in that org. This is informational: the Pre-package Tests step must still pass as a full run.')) {
+      return;
+    }
+    await withBusy('Re-running failed tests', async () => {
+      const rerun = await runApexTests(sf, {
+        root, org: org.alias ?? org.username, orgLabel: label, level: 'RunSpecifiedTests', tests: failedNames,
+        waitMinutes: qualitySettings().waitMinutes, outputDir: reportsDir, deployedLocalSource: false, signal: undefined
+      });
+      quality.update({ rerun });
+      engine.addArtifact(reports.write('apex-rerun', `Rerun of ${failedNames.length} failed test(s)`, { org: label, failedBefore: failedNames, result: { total: rerun.total, passed: rerun.passed, failed: rerun.failed } }));
+      notice = { level: rerun.failed ? 'error' : 'info', text: `Rerun finished: ${rerun.passed}/${rerun.total} passed. Run the Pre-package Tests step again for a full, gate-eligible result.` };
     });
   };
 
@@ -173,7 +379,8 @@ export function activate(context: vscode.ExtensionContext): void {
         break;
       case 'selectDevHub':
       case 'selectDevOrg':
-      case 'selectPackage': {
+      case 'selectPackage':
+      case 'selectValidationOrg': {
         const known = discovery.snapshot.orgs;
         const valid = msg.alias === '' || msg.type === 'selectPackage' ||
           known.some(o => o.alias === msg.alias || o.username === msg.alias);
@@ -188,6 +395,9 @@ export function activate(context: vscode.ExtensionContext): void {
             engine.markStale('preflight', 'the selected Dev Hub changed');
           } else if (msg.type === 'selectDevOrg') {
             await discovery.selectDevOrg(value);
+          } else if (msg.type === 'selectValidationOrg') {
+            await discovery.selectValidationOrg(value);
+            engine.markStale('tests', 'the validation org changed');
           } else {
             await discovery.selectPackage(value);
             engine.markStale('preflight', 'the selected package changed');
@@ -205,8 +415,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         await withBusy('Previewing org changes', async () => {
           const out = await retrieval.preview(root, org);
-          const ev = reports.write('retrieve-preview', `Retrieve preview from ${out.orgLabel}`, out);
-          engine.addArtifact(ev);
+          engine.addArtifact(reports.write('retrieve-preview', `Retrieve preview from ${out.orgLabel}`, out));
           logger.log('info', 'retrieve', `Preview: ${out.preview.toRetrieve.length} to retrieve, ${out.preview.conflicts.length} conflict(s), ${out.overlap.length} overlapping local edit(s).`);
         });
         break;
@@ -245,12 +454,45 @@ export function activate(context: vscode.ExtensionContext): void {
         });
         break;
       }
-      case 'setSetting':
-        await cfg().update(msg.key, msg.value, vscode.ConfigurationTarget.Workspace);
+      case 'openFile':
+        await openFinding(msg.key);
         break;
+      case 'openReport':
+        await openReport(msg.ref);
+        break;
+      case 'exportReport':
+        if (knownRefs().has(msg.ref) && fs.existsSync(msg.ref)) {
+          await exportTo(path.basename(msg.ref), dest => fs.copyFileSync(msg.ref, dest));
+        }
+        break;
+      case 'exportSummary':
+        await exportTo('releasepilot-quality-summary.md', dest => fs.writeFileSync(dest, buildSummaryMarkdown({
+          project: getRoot(), generatedAt: new Date().toISOString(), quality: quality.get(), triage: triage.list(),
+          gate: qualitySettings().severityGate, coverageTarget: qualitySettings().coverageTargetPercent, steps: engine.getState().run.steps
+        }), 'utf8'));
+        break;
+      case 'triage':
+        await triageFinding(msg.key);
+        break;
+      case 'untriage':
+        triage.remove(msg.key);
+        engine.markStale('analysis', 'triage decisions changed');
+        break;
+      case 'applyFix':
+        await reviewAndApplyFix(msg.key);
+        break;
+      case 'rerunFailed':
+        await rerunFailedTests();
+        break;
+      case 'setSetting': {
+        const map: Record<string, string> = { testWaitMinutes: 'testWaitMinutes' };
+        await cfg().update(map[msg.key] ?? msg.key, msg.value, vscode.ConfigurationTarget.Workspace);
+        break;
+      }
       default:
         break;
     }
+    refreshUi();
   };
 
   const host = { extensionUri: context.extensionUri, engine, handleAction, extra: view };

@@ -1,5 +1,54 @@
 # ReleasePilot — Implementation Status
 
+## Slice 3 — Code Analyzer, Automated Testing, and Reports
+
+**State:** Implemented. Static analysis is verified end to end against the real Code Analyzer plugin. Apex testing and deployment are verified only with a mocked CLI because no validation org was designated, so no test run or deployment was executed in any real org.
+
+### Completed features
+- **Static analysis step** (`sf code-analyzer run`, JSON + HTML reports with fixes and suggestions requested): findings normalized (severity, rule, engine, file, line/column, message, tags, docs, fix, suggestions); grouping by file, severity or rule; filter; open-in-editor at the exact line; rescan; configurable rule selectors (e.g. add AppExchange) and severity gate (default: High and above).
+- **Outdated-scan detection:** each report stores the source fingerprint; the UI flags a scan or test run as OUTDATED when the live fingerprint differs, and editing source marks Source Ready and everything after it Stale.
+- **Incomplete-scan protection:** the JSON report does not record engine failures. A file PMD cannot parse produced no finding at all (found by live testing), so the CLI's `»` warning blocks are captured; any non-benign block makes the step Needs Review (`ANALYZER_WARNINGS`) instead of a clean pass.
+- **Triage:** a finding can be dismissed only with a written reason (min. 10 characters), owner and timestamp; entries are listed in the UI and the export, are removable, and changing them invalidates the analysis result.
+- **Fixes:** analyzer-provided fixes are applied only after a diff view and a modal confirmation, and only if the source is unchanged since the scan. Every fix is treated as behaviour-changing. (AI remediation is deliberately left to a later slice.)
+- **Pre-package Tests step:** requires an explicit validation org (never defaulted, never the Dev Hub, not expired); modal confirmation naming org, ID, type and what will happen; optional deploy of the package directories (`sf project deploy start --source-dir`, never any ignore flag) so the tests exercise the local source; `sf apex run test --code-coverage`; parsed pass/fail/skip counts, failure messages and stack traces, per-class coverage.
+- **Coverage honesty:** the figure is the validation org's org-wide coverage, compared with the configurable internal target (default 80%) and labelled "not package-version coverage"; the 75%/all-triggers package rule is documented as a Slice 4 build-time check.
+- **Source-not-proven rule:** if local source was not deployed by ReleasePilot, tests cannot Pass; they end Needs Review (`SOURCE_NOT_VERIFIED_IN_ORG`).
+- **LWC Jest:** detected from `package.json` + jest config; run through node on the project's own sfdx-lwc-jest; `NOT_CONFIGURED` is recorded without failing; configured-but-not-installed is Needs Review.
+- **Failed-test rerun:** reruns only the failed tests (`RunSpecifiedTests`) after confirmation; stored as informational and never satisfies the gate.
+- **Reports:** Open and Export buttons for every artifact (only known artifact paths are accepted); consolidated Markdown quality summary export with fingerprints, blockers, triage, failed tests, coverage and the disclaimer.
+- **Dependent steps blocked:** Package Readiness cannot run until Pre-package Tests passes, which cannot run until Static Analysis passes.
+- **UI:** new Quality tab, Validation org selector, severity gate / test level / deploy-before-tests / wait-time settings.
+
+### Requirement IDs
+FR-07, FR-08, FR-09, FR-10, FR-11, FR-12, FR-13, FR-22, FR-28 (analysis and test portions), FR-30 (fix review; fully verified only with mocked fix data); NFR-02, NFR-03, NFR-04 (validation org identity and Dev Hub exclusion), NFR-06, NFR-09, NFR-15.
+
+### Files created or modified
+New: `src/analysis/{analyzer,triage}.ts`, `src/testing/{apex,lwc,qualityStore,summary}.ts`, `src/executors/quality.ts`, `src/test/slice3.test.ts`. Modified: `src/adapters/sfCli.ts` (stderr capture), `src/discovery/{discoveryService,projectConfig}.ts` (validation org), `src/extension.ts`, `src/ui/{messages,dashboardPanel}.ts`, `media/{dashboard.js,dashboard.css}`, `package.json` (settings), `src/test/live.test.ts`.
+
+### Tests executed
+| Category | What | Result |
+|---|---|---|
+| Mocked | analyzer/Apex/deploy parsing and command construction, gates, executors for every outcome (no org, Dev Hub as org, declined, deploy failure, test failure, low coverage, unverified source, triage, warnings), summary export, message validation | pass |
+| Local integration | real fix application; LWC Jest plumbing with a fake Jest binary run through the real process runner | pass |
+| Local real tool (no org) | real Code Analyzer v5 plugin on a throwaway project: 8 findings parsed, zero warnings; a deliberately unparseable file is flagged as an incomplete scan | pass |
+| Live read-only (earlier slice) | org / package queries | pass (88/88 with `RP_LIVE=1`) |
+| Default suite | `npm run check` | 84 passed, 4 live/local-tool tests skipped |
+| **Not run** | Apex tests and deployment in a real org; real analyzer fixes (the installed engines emitted none); VS Code UI check | see limitations |
+
+### Defects found by real-tool testing and fixed
+1. A file that PMD cannot parse yields **no finding**; the failure appears only in CLI warnings. Without capturing them a broken class would give a clean scan.
+2. A naive "any warning blocks" rule would have blocked every scan: healthy runs always print a "Could not find typescript" notice. Warnings are now grouped into blocks and known-benign notices ignored.
+
+### Known limitations
+- The Apex result shape (`summary.orgWideCoverage`, `tests[]`, `coverage.coverage[]`) follows Salesforce documentation and is **not verified against a live org**. The first real run should be reviewed before relying on the gate.
+- The `fixes[]`/`suggestions[]` shape follows documentation; the installed engines produced none to verify against.
+- Deploy-then-test writes to the chosen validation org by design (after confirmation). Test runs create Apex test run records there.
+- A local timeout leaves the remote job running; the step is Needs Review rather than Failed.
+- Warning classification relies on the CLI's `»` markers and a short benign list; new CLI wording could need an update.
+- The Quality tab and diff-based fix flow have not been exercised in a live VS Code window.
+
+### Recommended next: Slice 4 — managed 2GP package creation (after approval).
+
 ## Slice 2 — Salesforce Integration and Project Discovery
 
 **State:** Implemented; automated and live read-only checks pass. Interactive check in the Extension Development Host is still a manual step for the user.

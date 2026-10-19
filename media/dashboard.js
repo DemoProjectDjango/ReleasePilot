@@ -5,7 +5,7 @@
 
   const ICON = { pending: '○', running: '↻', passed: '✓', failed: '✕', blocked: '⛔', 'needs-review': '👁', stale: '⟳', skipped: '⤼', cancelled: '⊘' };
   const LABEL = { pending: 'Pending', running: 'Running', passed: 'Passed', failed: 'Failed', blocked: 'Blocked', 'needs-review': 'Needs Review', stale: 'Stale', skipped: 'Skipped', cancelled: 'Cancelled' };
-  const TABS = [['pipeline', 'Pipeline'], ['project', 'Project'], ['logs', 'Logs'], ['errors', 'Errors'], ['reports', 'Reports & Artifacts'], ['history', 'Release History'], ['settings', 'Settings']];
+  const TABS = [['pipeline', 'Pipeline'], ['project', 'Project'], ['quality', 'Quality'], ['logs', 'Logs'], ['errors', 'Errors'], ['reports', 'Reports & Artifacts'], ['history', 'Release History'], ['settings', 'Settings']];
 
   const saved = vscode.getState() || {};
   let tab = saved.tab || 'pipeline';
@@ -180,6 +180,106 @@
     return el('div', {}, parts);
   }
 
+  let qGroup = 'file';
+  let qFilter = '';
+  let qShowTriaged = false;
+
+  function sevBadge(f) { return el('span', { class: 'badge sev' + f.severity }, f.severityLabel); }
+
+  function findingRow(f) {
+    return el('div', { class: 'finding' + (f.triaged ? ' triaged' : '') },
+      el('div', {}, sevBadge(f), ' ', el('strong', {}, f.rule), ' ', el('span', { class: 'muted' }, '(' + f.engine + ') ' + f.file + ':' + f.line + ':' + f.column)),
+      el('div', {}, f.message),
+      f.suggestions.length ? el('div', { class: 'muted' }, 'Suggestion: ' + f.suggestions.join(' | ')) : null,
+      f.resources.length ? el('div', { class: 'muted' }, 'Docs: ' + f.resources.join(' ')) : null,
+      el('div', { class: 'toolbar' },
+        el('button', { class: 'action secondary', onclick: () => post({ type: 'openFile', key: f.key }) }, 'Open in editor'),
+        f.fix ? el('button', { class: 'action secondary', title: 'Shows a diff and asks before changing anything', onclick: () => post({ type: 'applyFix', key: f.key }) }, 'Review suggested fix') : null,
+        f.triaged ? el('button', { class: 'action secondary', onclick: () => post({ type: 'untriage', key: f.key }) }, 'Remove triage')
+          : el('button', { class: 'action secondary', onclick: () => post({ type: 'triage', key: f.key }) }, 'Triage...')));
+  }
+
+  function groupOf(f) { return qGroup === 'file' ? f.file : qGroup === 'rule' ? f.rule : f.severityLabel; }
+
+  function analysisSection(q) {
+    const a = q.analysis;
+    const parts = [el('h2', {}, 'Static analysis')];
+    parts.push(el('div', { class: 'toolbar' },
+      el('button', { class: 'action', disabled: !!data.busy, onclick: () => post({ type: 'run', stepId: 'analysis' }) }, a ? 'Rescan' : 'Run Code Analyzer'),
+      el('button', { class: 'action secondary', onclick: () => post({ type: 'exportSummary' }) }, 'Export quality summary...')));
+    if (!a) { parts.push(el('div', { class: 'empty' }, 'No scan yet. Source Ready must pass before the analyzer can run.')); return parts; }
+    if (a.outdated) { parts.push(el('div', { class: 'banner', role: 'alert' }, 'This scan is OUTDATED: the source changed after it ran. Rescan before relying on it.')); }
+    if (a.warnings && a.warnings.length) { parts.push(el('div', { class: 'err', role: 'alert' }, el('strong', {}, 'The scan may be incomplete. '), 'Code Analyzer printed warnings:', el('pre', { class: 'log-line' }, a.warnings.slice(0, 12).join('\n')))); }
+    const c = a.counts;
+    parts.push(el('p', {}, c.total + ' finding(s): ' + c.Critical + ' critical, ' + c.High + ' high, ' + c.Moderate + ' moderate, ' + c.Low + ' low' +
+      ' · gate: block at ' + q.gate + ' and above · ' + a.blockers + ' untriaged blocker(s) · scanned ' + fmt(a.at)));
+    parts.push(el('p', { class: 'muted' }, 'Selectors: ' + a.selectors.join(', ') + ' · ' + Object.entries(a.versions).map(e => e[0] + ' ' + e[1]).join(', ') + ' · ' + a.jsonPath));
+    const groupSel = el('select', { 'aria-label': 'Group findings by' }, ['file', 'severity', 'rule'].map(g => el('option', { value: g, selected: g === qGroup }, 'Group by ' + g)));
+    groupSel.addEventListener('change', () => { qGroup = groupSel.value; render(); });
+    const filter = el('input', { type: 'search', placeholder: 'Filter by rule, file or text', value: qFilter, 'aria-label': 'Filter findings' });
+    filter.addEventListener('change', () => { qFilter = filter.value; render(); });
+    const showT = el('input', { type: 'checkbox', id: 'show-triaged', checked: qShowTriaged });
+    showT.addEventListener('change', () => { qShowTriaged = showT.checked; render(); });
+    parts.push(el('div', { class: 'toolbar' }, groupSel, filter, el('label', { for: 'show-triaged' }, showT, ' show triaged')));
+    const needle = qFilter.toLowerCase();
+    const list = a.findings.filter(f => (qShowTriaged || !f.triaged) && (!needle || (f.rule + ' ' + f.file + ' ' + f.message).toLowerCase().includes(needle)));
+    if (!list.length) { parts.push(el('div', { class: 'empty' }, a.findings.length ? 'No findings match the filter.' : 'No findings.')); return parts; }
+    const groups = new Map();
+    list.forEach(f => { const k = groupOf(f); groups.set(k, (groups.get(k) || []).concat([f])); });
+    const sorted = [...groups.entries()].sort((x, y) => qGroup === 'severity' ? x[1][0].severity - y[1][0].severity : y[1].length - x[1].length);
+    sorted.forEach(([k, fs]) => {
+      fs.sort((x, y) => x.severity - y.severity || x.line - y.line);
+      parts.push(el('details', { class: 'step', open: sorted.length === 1 || qGroup === 'severity' },
+        el('summary', {}, el('strong', {}, k), el('span', { class: 'badge' }, String(fs.length))), el('div', { class: 'body' }, fs.slice(0, 200).map(findingRow),
+          fs.length > 200 ? el('p', { class: 'muted' }, (fs.length - 200) + ' more; narrow the filter.') : null)));
+    });
+    if (a.truncated) { parts.push(el('p', { class: 'muted' }, 'Only the first 3000 findings are shown; open the JSON report for all.')); }
+    if (q.triage.length) {
+      parts.push(el('h2', {}, 'Triage decisions'));
+      parts.push(table(['Finding', 'Owner', 'When', 'Reason'], q.triage.map(t => el('tr', {}, el('td', {}, t.key), el('td', {}, t.owner), el('td', {}, fmt(t.at)), el('td', {}, t.reason))), ''));
+    }
+    return parts;
+  }
+
+  function testsSection(q) {
+    const a = q.apex;
+    const parts = [el('h2', {}, 'Apex tests and coverage')];
+    const failedTests = a ? a.tests.filter(t => t.outcome !== 'Pass' && t.outcome !== 'Skip') : [];
+    parts.push(el('div', { class: 'toolbar' },
+      el('button', { class: 'action', disabled: !!data.busy, onclick: () => post({ type: 'run', stepId: 'tests' }) }, a ? 'Run Tests Again' : 'Run Tests'),
+      el('button', { class: 'action secondary', disabled: !!data.busy || !failedTests.length, onclick: () => post({ type: 'rerunFailed' }) }, 'Rerun Failed Tests Only')));
+    parts.push(el('p', { class: 'muted' }, 'Tests run in the selected Validation org only (never the Dev Hub), after you confirm. Coverage below is the validation org’s org-wide figure, NOT package-version coverage; Salesforce requires ≥75% package-version coverage and every trigger covered, which is verified when the beta package is built.'));
+    if (!a) { parts.push(el('div', { class: 'empty' }, 'No test run recorded yet.')); }
+    else {
+      if (a.outdated) { parts.push(el('div', { class: 'banner', role: 'alert' }, 'This test run is OUTDATED: the source changed after it ran.')); }
+      parts.push(el('p', {}, a.orgLabel + ' · ' + a.testLevel + ' · outcome ' + a.outcome + ' · ' + a.passed + ' passed, ' + a.failed + ' failed, ' + a.skipped + ' skipped of ' + a.total + ' · ' + fmt(a.at)));
+      parts.push(el('p', {}, 'Coverage: ' + a.gate.coverageLabel + ' · target ' + q.coverageTarget + '% · local source deployed by ReleasePilot: ' + (a.deployedLocalSource ? 'yes' : 'NO')));
+      a.gate.problems.forEach(pr => parts.push(el('div', { class: 'err' }, pr)));
+      if (a.gate.sourceUnverified) { parts.push(el('div', { class: 'banner' }, 'Local source was not deployed to the org by ReleasePilot, so this result is not proven to describe your code.')); }
+      const ordered = a.tests.slice().sort((x, y) => (x.outcome === 'Pass') - (y.outcome === 'Pass'));
+      parts.push(table(['Test', 'Outcome', 'Message'], ordered.slice(0, 500).map(t => el('tr', {}, el('td', {}, t.fullName),
+        el('td', {}, (t.outcome === 'Pass' ? '✓ ' : t.outcome === 'Skip' ? '⤷ ' : '✕ ') + t.outcome),
+        el('td', {}, t.message || '', t.stackTrace ? el('details', {}, el('summary', {}, 'Stack trace'), el('pre', { class: 'log-line' }, t.stackTrace)) : null))), 'No individual test results returned.'));
+      if (a.classes.length) {
+        parts.push(el('h2', {}, 'Class coverage (lowest first)'));
+        parts.push(table(['Class', 'Covered', 'Lines', '%'], a.classes.slice().sort((x, y) => x.percent - y.percent).slice(0, 100).map(cl =>
+          el('tr', {}, el('td', {}, cl.name), el('td', {}, cl.coveredLines), el('td', {}, cl.totalLines), el('td', {}, cl.percent + (cl.percent < 75 ? ' ⚠' : '')))), ''));
+      }
+      if (a.rawPath) { parts.push(el('p', { class: 'muted' }, 'Raw results: ' + a.rawPath)); }
+    }
+    if (q.rerun) { parts.push(el('p', {}, 'Last failed-test rerun (informational): ' + q.rerun.passed + '/' + q.rerun.total + ' passed at ' + fmt(q.rerun.at) + '. A full run is still required to pass the gate.')); }
+    const l = q.lwc;
+    parts.push(el('h2', {}, 'LWC Jest'));
+    parts.push(l ? el('p', {}, l.configured ? l.passed + '/' + l.total + ' passed, ' + l.failed + ' failed' + (l.reason ? ' · ' + l.reason : '') : 'NOT_CONFIGURED: ' + l.reason) : el('p', { class: 'muted' }, 'Runs together with the Pre-package Tests step.'));
+    if (l && l.failures && l.failures.length) { parts.push(table(['File', 'Test', 'Message'], l.failures.map(f => el('tr', {}, el('td', {}, f.file), el('td', {}, f.test), el('td', {}, el('pre', { class: 'log-line' }, f.message)))), '')); }
+    return parts;
+  }
+
+  function qualityTab() {
+    const q = data.quality || { triage: [] };
+    return el('div', {}, analysisSection(q), testsSection(q));
+  }
+
   function logsTab() {
     const logs = data.state.logs;
     return el('div', {},
@@ -207,13 +307,15 @@
 
   function reportsTab() {
     const rows = [];
-    const row = (who, e) => el('tr', {}, el('td', {}, who), el('td', {}, e.kind), el('td', {}, e.label), el('td', {}, e.ref), el('td', {}, fmt(e.createdAt)));
+    const row = (who, e) => el('tr', {}, el('td', {}, who), el('td', {}, e.kind), el('td', {}, e.label), el('td', {}, e.ref), el('td', {}, fmt(e.createdAt)),
+      el('td', {}, el('button', { class: 'action secondary', onclick: () => post({ type: 'openReport', ref: e.ref }) }, 'Open'), ' ',
+        el('button', { class: 'action secondary', onclick: () => post({ type: 'exportReport', ref: e.ref }) }, 'Export...')));
     for (const s of Object.values(data.state.run.steps)) {
       const def = data.definitions.find(d => d.id === s.id);
       s.evidence.forEach(e => rows.push(row(def.title, e)));
     }
     (data.state.artifacts || []).forEach(e => rows.push(row('Project', e)));
-    return table(['Source', 'Kind', 'Label', 'Reference', 'Created'], rows,
+    return table(['Source', 'Kind', 'Label', 'Reference', 'Created', 'Actions'], rows,
       'No reports or artifacts yet. Evidence appears here once steps run or a retrieval preview is created.');
   }
 
@@ -236,11 +338,24 @@
       });
       return el('tr', {}, el('td', {}, el('label', { for: 'set-' + key }, label)), el('td', {}, input), el('td', { class: 'muted' }, hint));
     };
+    const choice = (key, label, options, hint) => {
+      const sel = el('select', { id: 'set-' + key }, options.map(o => el('option', { value: o, selected: s[key] === o }, o)));
+      sel.addEventListener('change', () => post({ type: 'setSetting', key, value: sel.value }));
+      return el('tr', {}, el('td', {}, el('label', { for: 'set-' + key }, label)), el('td', {}, sel), el('td', { class: 'muted' }, hint));
+    };
+    const deploy = el('input', { type: 'checkbox', id: 'set-deployBeforeTests', checked: s.deployBeforeTests });
+    deploy.addEventListener('change', () => post({ type: 'setSetting', key: 'deployBeforeTests', value: deploy.checked }));
     const dirty = el('input', { type: 'checkbox', id: 'set-allowDirtySource', checked: s.allowDirtySource });
     dirty.addEventListener('change', () => post({ type: 'setSetting', key: 'allowDirtySource', value: dirty.checked }));
     return el('div', {}, el('table', {}, el('tbody', {},
       el('tr', {}, el('td', {}, el('label', { for: 'set-allowDirtySource' }, 'Allow uncommitted source')), el('td', {}, dirty),
         el('td', { class: 'muted' }, 'Lets Source Ready pass with uncommitted changes. Not recommended for release candidates.')),
+      choice('severityGate', 'Analyzer severity gate', ['none', 'critical', 'high', 'moderate', 'low'], 'Untriaged findings at or above this severity block the pipeline.'),
+      choice('testLevel', 'Apex test level', ['RunLocalTests', 'RunAllTestsInOrg'], 'Test level for the Pre-package Tests step.'),
+      el('tr', {}, el('td', {}, el('label', { for: 'set-deployBeforeTests' }, 'Deploy local source before tests')), el('td', {}, deploy),
+        el('td', { class: 'muted' }, 'Asks for confirmation, then deploys package directories to the validation org. If off, test results cannot pass the gate.')),
+      field('testWaitMinutes', 'Deploy/test wait (minutes)', 1, 600, 'A local timeout never cancels remote jobs.'),
+      el('tr', {}, el('td', {}, 'Rule selectors'), el('td', {}, (s.ruleSelectors || []).join(', ')), el('td', { class: 'muted' }, 'Edit "releasepilot.ruleSelectors" in VS Code settings (e.g. add AppExchange).')),
       field('coverageTargetPercent', 'Internal coverage target (%)', 0, 100, 'Org-level target. Salesforce package-version coverage (minimum 75%) is evaluated separately.'),
       field('logRetentionEntries', 'Log retention (entries)', 100, 50000, 'Persisted log size.'),
       field('stepTimeoutMinutes', 'Step timeout (minutes)', 1, 720, 'Applies after reload. A local timeout never cancels remote jobs.'))));
@@ -264,6 +379,7 @@
     proj.addEventListener('change', () => post({ type: 'selectFolder', path: proj.value }));
     return el('div', { class: 'selectors' }, el('label', {}, 'Project', proj),
       orgSelect('Development org', d.devOrg, orgs.filter(o => !o.isDevHub || !o.isScratch), 'selectDevOrg'),
+      orgSelect('Validation org', d.validationOrg, orgs.filter(o => !d.devHub || o.orgId !== d.devHub.orgId), 'selectValidationOrg'),
       orgSelect('Dev Hub', d.devHub, orgs.filter(o => o.isDevHub), 'selectDevHub'));
   }
 
@@ -271,7 +387,7 @@
     if (!data) { app.replaceChildren(el('p', {}, 'Loading…')); return; }
     const tabs = el('nav', { role: 'tablist' }, TABS.map(([id, label]) =>
       el('button', { role: 'tab', 'aria-selected': String(tab === id), onclick: () => { tab = id; persistUi(); render(); } }, label)));
-    const view = { pipeline: pipelineTab, project: projectTab, logs: logsTab, errors: errorsTab, reports: reportsTab, history: historyTab, settings: settingsTab }[tab]();
+    const view = { pipeline: pipelineTab, project: projectTab, quality: qualityTab, logs: logsTab, errors: errorsTab, reports: reportsTab, history: historyTab, settings: settingsTab }[tab]();
     app.replaceChildren(
       el('h1', {}, 'ReleasePilot'),
       el('div', { class: 'muted' }, 'Salesforce managed 2GP release automation · TwinStack Solutions'),

@@ -28,6 +28,7 @@ export interface DiscoverySnapshot {
   orgs: OrgInfo[];
   devHub?: OrgInfo;
   devOrg?: OrgInfo;
+  validationOrg?: OrgInfo;
   packages: DevHubPackage[];
   selectedPackage?: DevHubPackage;
   versions: PackageVersionInfo[];
@@ -79,6 +80,8 @@ export class DiscoveryService {
       const find = (name?: string) => name ? next.orgs.find(o => o.alias === name || o.username === name) : undefined;
       next.devHub = find(next.config.devHubAlias) ?? find(defaults.devHub);
       next.devOrg = find(next.config.devOrgAlias) ?? find(defaults.org);
+      // The validation org is never defaulted: tests/deploys must target an explicit, user-chosen org.
+      next.validationOrg = find(next.config.validationOrgAlias);
       if (next.config.devHubAlias && !find(next.config.devHubAlias)) {
         errors.push({ scope: 'orgs', code: 'ORG_NOT_FOUND', message: `Configured Dev Hub "${next.config.devHubAlias}" is not among the authenticated orgs.`, remediation: 'Authenticate it with "sf org login web --set-default-dev-hub" or select another Dev Hub.' });
       }
@@ -101,6 +104,10 @@ export class DiscoveryService {
 
   async selectDevOrg(alias: string | undefined, signal?: AbortSignal): Promise<DiscoverySnapshot> {
     return this.update({ devOrgAlias: alias ? assertAlias(alias) : undefined }, signal);
+  }
+
+  async selectValidationOrg(alias: string | undefined, signal?: AbortSignal): Promise<DiscoverySnapshot> {
+    return this.update({ validationOrgAlias: alias ? assertAlias(alias) : undefined }, signal);
   }
 
   async selectPackage(alias: string | undefined, signal?: AbortSignal): Promise<DiscoverySnapshot> {

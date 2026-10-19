@@ -117,5 +117,6 @@ Workspace Trust (`untrustedWorkspaces: limited`, engine refuses execution); webv
 - [x] Stage 0 analysis and docs
 - [x] Slice 1 foundation (see status doc)
 - [x] Slice 2 discovery and CLI adapter
-- [ ] Slice 3 … Slice 6
+- [x] Slice 3 analysis, tests, reports
+- [ ] Slice 4 … Slice 6
 - [ ] Post-MVP proposals (AI remediation, CI, multi-project dashboard, security-review prep, release notes, Partner Console, push upgrades, analytics)

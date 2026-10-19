@@ -7,6 +7,7 @@ import { CommandHistory } from '../adapters/commandHistory';
 import { GitAdapter } from '../adapters/git';
 import { NodeProcessRunner } from '../adapters/processRunner';
 import { SfCli, resolveSfLauncher } from '../adapters/sfCli';
+import { runCodeAnalyzer } from '../analysis/analyzer';
 import { DiscoveryService } from '../discovery/discoveryService';
 import { evaluatePreflight } from '../executors/executors';
 
@@ -87,4 +88,58 @@ describe.skipIf(!live)('LIVE read-only discovery', () => {
     expect(badChecks.some(c => c.name === 'Package ownership' && c.status === 'fail')).toBe(true);
     [probeDir, good, bad].forEach(d => cleanup(d));
   }, 480_000);
+});
+
+/**
+ * LOCAL tool test: runs the real Code Analyzer v5 plugin on a throwaway project. No org is contacted.
+ */
+// String.raw keeps the backslash-escaped quotes that make this valid (and injectable) Apex.
+const APEX_BAD = String.raw`public class Bad {
+  public void run(String name) {
+    try {
+      List<Account> a = Database.query('SELECT Id FROM Account WHERE Name = \'' + name + '\'');
+    } catch (Exception e) {
+    }
+    System.debug('x');
+  }
+}
+`;
+
+describe.skipIf(!live)('LOCAL Code Analyzer (real plugin, no org)', () => {
+  it('scans an Apex class and yields normalized findings', async () => {
+    const dir = fixture({ packageDirectories: [{ path: 'force-app', default: true }], sourceApiVersion: '62.0' });
+    const classes = path.join(dir, 'force-app', 'main', 'default', 'classes');
+    fs.mkdirSync(classes, { recursive: true });
+    fs.writeFileSync(path.join(classes, 'Bad.cls'), APEX_BAD);
+    fs.writeFileSync(path.join(classes, 'Bad.cls-meta.xml'), '<?xml version="1.0" encoding="UTF-8"?><ApexClass xmlns="http://soap.sforce.com/2006/04/metadata"><apiVersion>62.0</apiVersion><status>Active</status></ApexClass>');
+    const runner = new NodeProcessRunner();
+    const sf = new SfCli(runner, new CommandHistory(), resolveSfLauncher());
+    const out = path.join(dir, '.out');
+    const report = await runCodeAnalyzer(sf, { root: dir, outputDir: out, selectors: ['Recommended'] });
+    console.log(`LOCAL analyzer: ${report.counts.total} findings ${JSON.stringify(report.counts)} versions=${JSON.stringify(report.versions)} fixes=${report.findings.filter(f => f.fix).length} html=${!!report.htmlPath}`);
+    const rawJson = JSON.parse(fs.readFileSync(report.jsonPath, 'utf8')) as { violations?: unknown[]; runDir?: string };
+    console.log('LOCAL raw violations=' + rawJson.violations?.length + ' runDir=' + rawJson.runDir + ' cls=' + fs.existsSync(path.join(classes, 'Bad.cls')) + ' size=' + fs.statSync(path.join(classes, 'Bad.cls')).size);
+    console.log('LOCAL sample: ' + report.findings.slice(0, 3).map(f => `${f.severityLabel}:${f.rule}@${f.file}:${f.line}`).join(' | '));
+    expect(report.warnings).toEqual([]);
+    expect(report.findings.length).toBeGreaterThan(0);
+    expect(report.findings.every(f => f.file === '(workspace)' || fs.existsSync(f.absFile))).toBe(true);
+    expect(report.findings.some(f => f.file.endsWith('Bad.cls'))).toBe(true);
+    expect(report.htmlPath && fs.existsSync(report.htmlPath)).toBeTruthy();
+    cleanup(dir);
+  }, 300_000);
+});
+
+describe.skipIf(!live)('LOCAL Code Analyzer incomplete-scan detection', () => {
+  it('surfaces an engine parse failure as warnings instead of a silently clean scan', async () => {
+    const dir = fixture({ packageDirectories: [{ path: 'force-app', default: true }], sourceApiVersion: '62.0' });
+    const classes = path.join(dir, 'force-app', 'main', 'default', 'classes');
+    fs.mkdirSync(classes, { recursive: true });
+    fs.writeFileSync(path.join(classes, 'Broken.cls'), 'public class Broken { public void run( { \n');
+    const sf = new SfCli(new NodeProcessRunner(), new CommandHistory(), resolveSfLauncher());
+    const report = await runCodeAnalyzer(sf, { root: dir, outputDir: path.join(dir, '.out'), selectors: ['Recommended'] });
+    console.log('LOCAL broken-file: findings=' + report.counts.total + ' warnings=' + report.warnings.length + ' first=' + (report.warnings[0] ?? '').slice(0, 120));
+    expect(report.warnings.length).toBeGreaterThan(0);
+    expect(report.warnings.join(' ')).toMatch(/pmd/i);
+    cleanup(dir);
+  }, 300_000);
 });

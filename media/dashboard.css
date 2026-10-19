@@ -58,3 +58,8 @@ th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--vsco
 .lvl-warn { color: var(--vscode-editorWarning-foreground); }
 .empty { padding: 16px; border: 1px dashed var(--vscode-panel-border); border-radius: 4px; }
 .err { border-left: 3px solid var(--vscode-errorForeground); padding: 6px 10px; margin: 8px 0; }
+.finding { border-left: 3px solid var(--vscode-panel-border); padding: 6px 10px; margin: 8px 0; }
+.finding.triaged { opacity: 0.6; }
+.badge.sev1, .badge.sev2 { border-color: var(--vscode-testing-iconFailed, #f85149); font-weight: 600; }
+.badge.sev3 { border-color: var(--vscode-editorWarning-foreground); }
+input[type=search] { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); padding: 4px 6px; min-width: 240px; }

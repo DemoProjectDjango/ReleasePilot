@@ -68,7 +68,12 @@ export class DashboardPanel {
         coverageTargetPercent: cfg.get<number>('coverageTargetPercent', 80),
         logRetentionEntries: cfg.get<number>('logRetentionEntries', 2000),
         stepTimeoutMinutes: cfg.get<number>('stepTimeoutMinutes', 60),
-        allowDirtySource: cfg.get<boolean>('allowDirtySource', false)
+        allowDirtySource: cfg.get<boolean>('allowDirtySource', false),
+        deployBeforeTests: cfg.get<boolean>('deployBeforeTests', true),
+        severityGate: cfg.get<string>('severityGate', 'high'),
+        testLevel: cfg.get<string>('testLevel', 'RunLocalTests'),
+        testWaitMinutes: cfg.get<number>('testWaitMinutes', 60),
+        ruleSelectors: cfg.get<string[]>('ruleSelectors', ['Recommended'])
       }
     });
   }
