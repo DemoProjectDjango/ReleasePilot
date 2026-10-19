@@ -17,5 +17,6 @@ $env:RP_LIVE=1; npx vitest run src/test/live.test.ts
 Press **F5** in VS Code to launch the Extension Development Host, open a Salesforce DX project folder, click the ReleasePilot icon in the Activity Bar and choose **Open Dashboard**.
 
 ## Docs
+- **[User guide: install, launch and test](docs/USER_GUIDE.md)**
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md)
 - [Implementation status](docs/IMPLEMENTATION_STATUS.md)
