@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { Logger } from '../core/logger';
 import {
-  Failure, RunSummary, StepDefinition, StepExecutor, StepId, StepResult, StepState, StepStatus, WorkflowState
+  Evidence, Failure, RunSummary, StepDefinition, StepExecutor, StepId, StepResult, StepState, StepStatus, WorkflowState
 } from '../core/models';
 import { PIPELINE } from '../core/pipeline';
 import { redact } from '../core/redact';
@@ -212,6 +212,23 @@ export class WorkflowEngine {
       this.persist();
     }
     return affected;
+  }
+
+  /** Marks a step itself (if it holds a result) and everything downstream stale. */
+  markStale(id: StepId, reason: string): void {
+    const s = this.state.run.steps[id];
+    if (s.status === 'passed' || s.status === 'needs-review' || s.status === 'skipped') {
+      s.status = 'stale';
+      s.message = `Stale: ${reason}`;
+      this.opts.logger.log('warn', 'engine', `Invalidated ${id}: ${reason}`, id);
+    }
+    this.invalidateDownstream(id, reason);
+    this.persist();
+  }
+
+  addArtifact(evidence: Evidence): void {
+    this.state.artifacts = [evidence, ...(this.state.artifacts ?? [])].slice(0, 200);
+    this.persist();
   }
 
   /** Resets a step and everything downstream to pending/stale so it can be re-executed. */

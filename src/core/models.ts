@@ -96,6 +96,8 @@ export interface WorkflowState {
   run: Run;
   history: RunSummary[];
   logs: LogEntry[];
+  /** Reports produced outside a step run (e.g. retrieval previews). */
+  artifacts?: Evidence[];
 }
 
 export interface StepResult {

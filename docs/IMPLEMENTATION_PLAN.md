@@ -116,5 +116,6 @@ Workspace Trust (`untrustedWorkspaces: limited`, engine refuses execution); webv
 ## 5. Implementation checklist
 - [x] Stage 0 analysis and docs
 - [x] Slice 1 foundation (see status doc)
-- [ ] Slice 2 … Slice 6
+- [x] Slice 2 discovery and CLI adapter
+- [ ] Slice 3 … Slice 6
 - [ ] Post-MVP proposals (AI remediation, CI, multi-project dashboard, security-review prep, release notes, Partner Console, push upgrades, analytics)

@@ -7,6 +7,8 @@ export interface DashboardHost {
   extensionUri: vscode.Uri;
   engine: WorkflowEngine;
   handleAction(msg: WebviewMessage): Promise<void>;
+  /** Additional view-model data (discovery, retrieval, busy state). */
+  extra(): Record<string, unknown>;
 }
 
 export class DashboardPanel {
@@ -58,13 +60,15 @@ export class DashboardPanel {
     const folders = (vscode.workspace.workspaceFolders ?? []).map(f => ({ name: f.name, path: f.uri.fsPath }));
     void this.panel.webview.postMessage({
       type: 'state',
+      ...this.host.extra(),
       state: engine.getState(),
       definitions: engine.getDefinitions().map(d => ({ ...d, hasExecutor: engine.hasExecutor(d.id) })),
       workspace: { trusted: vscode.workspace.isTrusted, folders },
       settings: {
         coverageTargetPercent: cfg.get<number>('coverageTargetPercent', 80),
         logRetentionEntries: cfg.get<number>('logRetentionEntries', 2000),
-        stepTimeoutMinutes: cfg.get<number>('stepTimeoutMinutes', 60)
+        stepTimeoutMinutes: cfg.get<number>('stepTimeoutMinutes', 60),
+        allowDirtySource: cfg.get<boolean>('allowDirtySource', false)
       }
     });
   }

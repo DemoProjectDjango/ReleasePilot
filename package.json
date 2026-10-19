@@ -60,6 +60,10 @@
           "type": "number", "default": 2000, "minimum": 100, "maximum": 50000,
           "description": "Maximum number of log entries kept in the persisted log."
         },
+        "releasepilot.allowDirtySource": {
+          "type": "boolean", "default": false,
+          "description": "Allow the Source Ready step to pass with uncommitted changes. Release candidates should normally be built from committed source."
+        },
         "releasepilot.stepTimeoutMinutes": {
           "type": "number", "default": 60, "minimum": 1, "maximum": 720,
           "description": "Local wait timeout for a workflow step. A timeout does not cancel remote Salesforce jobs."
