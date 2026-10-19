@@ -5,7 +5,7 @@
 
   const ICON = { pending: '○', running: '↻', passed: '✓', failed: '✕', blocked: '⛔', 'needs-review': '👁', stale: '⟳', skipped: '⤼', cancelled: '⊘' };
   const LABEL = { pending: 'Pending', running: 'Running', passed: 'Passed', failed: 'Failed', blocked: 'Blocked', 'needs-review': 'Needs Review', stale: 'Stale', skipped: 'Skipped', cancelled: 'Cancelled' };
-  const TABS = [['pipeline', 'Pipeline'], ['project', 'Project'], ['quality', 'Quality'], ['logs', 'Logs'], ['errors', 'Errors'], ['reports', 'Reports & Artifacts'], ['history', 'Release History'], ['settings', 'Settings']];
+  const TABS = [['pipeline', 'Pipeline'], ['project', 'Project'], ['quality', 'Quality'], ['package', 'Package'], ['logs', 'Logs'], ['errors', 'Errors'], ['reports', 'Reports & Artifacts'], ['history', 'Release History'], ['settings', 'Settings']];
 
   const saved = vscode.getState() || {};
   let tab = saved.tab || 'pipeline';
@@ -180,6 +180,51 @@
     return el('div', {}, parts);
   }
 
+  const CHECK_ICON = { pass: '\u2713 Pass', fail: '\u2715 Fail', warn: '\u26A0 Warning' };
+
+  function packageTab() {
+    const pk = data.packaging || { candidates: [] };
+    const steps = data.state.run.steps;
+    const busy = !!data.busy;
+    const def = id => data.definitions.find(d => d.id === id);
+    const why = id => blockedReason(def(id), steps);
+    const parts = [];
+    parts.push(el('h2', {}, 'Managed 2GP beta package'));
+    parts.push(el('p', {}, pk.package
+      ? pk.package.name + ' (' + pk.package.id + ') · Dev Hub ' + (pk.devHub ? (pk.devHub.alias || pk.devHub.username) + ' (' + pk.devHub.orgId + ')' : 'none') + ' · version ' + (pk.versionNumber || 'n/a')
+      : 'No package selected. Run Discover & Preflight with a Dev Hub that owns your package.'));
+    parts.push(el('p', { class: 'muted' }, 'Packaging uses your local source and the Dev Hub; nothing is deployed to the Dev Hub. Releasable builds always use full validation and code coverage, never skip ancestry checks, and are never promoted from here.'));
+    parts.push(el('div', { class: 'toolbar' },
+      el('button', { class: 'action secondary', disabled: busy || !!why('package-readiness'), title: why('package-readiness') || '', onclick: () => post({ type: 'run', stepId: 'package-readiness' }) }, 'Check Readiness'),
+      el('button', { class: 'action', disabled: busy || !!why('package-build'), title: why('package-build') || '', onclick: () => post({ type: 'run', stepId: 'package-build' }) },
+        steps['package-build'].status === 'needs-review' || steps['package-build'].status === 'running' ? 'Continue Tracking Build' : 'Create Beta Package'),
+      el('button', { class: 'action secondary', disabled: busy, onclick: () => post({ type: 'refreshBuild' }) }, 'Refresh Build Status')));
+    const bw = why('package-build');
+    if (bw) { parts.push(el('p', { class: 'muted' }, 'Create Beta Package is unavailable: ' + bw)); }
+
+    parts.push(el('h2', {}, 'Readiness checks'));
+    const r = pk.readiness;
+    parts.push(r ? el('p', { class: 'muted' }, 'Evaluated ' + fmt(r.at) + ' for source ' + (r.sourceFingerprint || '').slice(0, 12)) : null);
+    parts.push(table(['Check', 'Result', 'Detail'], ((r && r.checks) || []).map(c => el('tr', {}, el('td', {}, c.name), el('td', {}, CHECK_ICON[c.status] || c.status),
+      el('td', {}, c.detail, c.remediation ? el('div', { class: 'muted' }, 'Next: ' + c.remediation) : null))), 'Not evaluated yet. Static Analysis and Pre-package Tests must pass first.'));
+
+    parts.push(el('h2', {}, 'Package builds'));
+    if (!pk.candidates.length) { parts.push(el('div', { class: 'empty' }, 'No builds recorded yet.')); }
+    pk.candidates.forEach(c => {
+      const cov = c.coveragePercent === undefined ? 'n/a' : c.coveragePercent + '%' + (c.hasPassedCodeCoverageCheck === true ? ' (check passed)' : c.hasPassedCodeCoverageCheck === false ? ' (check FAILED)' : '');
+      parts.push(el('div', { class: 'finding' },
+        el('div', {}, el('strong', {}, c.packageName + ' ' + c.versionNumber), ' ', el('span', { class: 'badge ' + (c.status === 'Success' ? 'passed' : c.status === 'Error' ? 'failed' : 'needs-review') }, c.status)),
+        table(['Field', 'Value'], [
+          ['Dev Hub', c.devHubAlias + ' (' + c.devHubOrgId + ')'], ['Build request (08c)', c.requestId], ['Subscriber package version (04t)', c.subscriberPackageVersionId || 'not yet available'],
+          ['Package code coverage', cov], ['Released', c.isReleased === undefined ? 'unknown' : c.isReleased ? 'Yes' : 'No (beta)'],
+          ['Branch / tag', (c.branch || '-') + ' / ' + (c.tag || '-')], ['Installation key', c.keyMode === 'key' ? 'set (not stored)' : 'bypassed'],
+          ['Source fingerprint', (c.sourceFingerprint || '').slice(0, 16)], ['Created', fmt(c.createdAt)], ['Last checked', c.lastPolledAt ? fmt(c.lastPolledAt) : '-']
+        ].map(([k, v]) => el('tr', {}, el('td', {}, k), el('td', {}, v))), ''),
+        c.errors && c.errors.length ? el('div', { class: 'err' }, el('strong', {}, 'Build errors'), el('pre', { class: 'log-line' }, c.errors.join('\n'))) : null));
+    });
+    return el('div', {}, parts);
+  }
+
   let qGroup = 'file';
   let qFilter = '';
   let qShowTriaged = false;
@@ -351,6 +396,9 @@
       el('tr', {}, el('td', {}, el('label', { for: 'set-allowDirtySource' }, 'Allow uncommitted source')), el('td', {}, dirty),
         el('td', { class: 'muted' }, 'Lets Source Ready pass with uncommitted changes. Not recommended for release candidates.')),
       choice('severityGate', 'Analyzer severity gate', ['none', 'critical', 'high', 'moderate', 'low'], 'Untriaged findings at or above this severity block the pipeline.'),
+      choice('installationKeyPolicy', 'Installation key policy', ['require', 'allow-bypass'], 'require: every build needs a key (asked each time, never stored). allow-bypass: empty key after explicit confirmation.'),
+      field('buildWaitMinutes', 'Package build wait (minutes)', 1, 720, 'Local tracking limit. A timeout never cancels the build; retry continues the same request.'),
+      field('buildPollSeconds', 'Build status poll (seconds)', 5, 120, 'Interval between status checks.'),
       choice('testLevel', 'Apex test level', ['RunLocalTests', 'RunAllTestsInOrg'], 'Test level for the Pre-package Tests step.'),
       el('tr', {}, el('td', {}, el('label', { for: 'set-deployBeforeTests' }, 'Deploy local source before tests')), el('td', {}, deploy),
         el('td', { class: 'muted' }, 'Asks for confirmation, then deploys package directories to the validation org. If off, test results cannot pass the gate.')),
@@ -387,7 +435,7 @@
     if (!data) { app.replaceChildren(el('p', {}, 'Loading…')); return; }
     const tabs = el('nav', { role: 'tablist' }, TABS.map(([id, label]) =>
       el('button', { role: 'tab', 'aria-selected': String(tab === id), onclick: () => { tab = id; persistUi(); render(); } }, label)));
-    const view = { pipeline: pipelineTab, project: projectTab, quality: qualityTab, logs: logsTab, errors: errorsTab, reports: reportsTab, history: historyTab, settings: settingsTab }[tab]();
+    const view = { pipeline: pipelineTab, project: projectTab, quality: qualityTab, package: packageTab, logs: logsTab, errors: errorsTab, reports: reportsTab, history: historyTab, settings: settingsTab }[tab]();
     app.replaceChildren(
       el('h1', {}, 'ReleasePilot'),
       el('div', { class: 'muted' }, 'Salesforce managed 2GP release automation · TwinStack Solutions'),

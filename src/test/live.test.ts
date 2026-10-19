@@ -8,6 +8,7 @@ import { GitAdapter } from '../adapters/git';
 import { NodeProcessRunner } from '../adapters/processRunner';
 import { SfCli, resolveSfLauncher } from '../adapters/sfCli';
 import { runCodeAnalyzer } from '../analysis/analyzer';
+import { fetchRequest, fetchVersionReport, listAllVersions, listRecentRequests } from '../packaging/build';
 import { DiscoveryService } from '../discovery/discoveryService';
 import { evaluatePreflight } from '../executors/executors';
 
@@ -142,4 +143,46 @@ describe.skipIf(!live)('LOCAL Code Analyzer incomplete-scan detection', () => {
     expect(report.warnings.join(' ')).toMatch(/pmd/i);
     cleanup(dir);
   }, 300_000);
+});
+
+/**
+ * LIVE read-only packaging queries. Nothing is created: only list/report commands against an existing package.
+ */
+describe.skipIf(!live)('LIVE read-only packaging queries', () => {
+  it('parses real version lists, build requests and version reports', async () => {
+    const runner = new NodeProcessRunner();
+    const history = new CommandHistory();
+    const sf = new SfCli(runner, history, resolveSfLauncher());
+    const svc = new DiscoveryService(sf, new GitAdapter(runner, history));
+    const dir = fixture({ packageDirectories: [{ path: 'force-app', default: true }] });
+    const first = await svc.discover(dir);
+    let hubAlias: string | undefined;
+    let pkgId: string | undefined;
+    for (const hub of first.orgs.filter(o => o.isDevHub)) {
+      const snap = await svc.selectDevHub(hub.alias ?? hub.username);
+      if (snap.packages.length) { hubAlias = hub.alias ?? hub.username; pkgId = snap.packages[0].id; break; }
+    }
+    expect(hubAlias).toBeDefined();
+    const c = { root: dir };
+    const versions = await listAllVersions(sf, hubAlias!, pkgId!, c);
+    const recent = await listRecentRequests(sf, hubAlias!, c);
+    console.log(`LIVE packaging: versions=${versions.length} released=${versions.filter(v => v.isReleased).length} recentRequests=${recent.length}`);
+    expect(versions.length).toBeGreaterThan(0);
+    const v04t = versions.find(v => v.subscriberPackageVersionId)?.subscriberPackageVersionId;
+    const report = await fetchVersionReport(sf, hubAlias!, v04t!, c);
+    console.log(`LIVE report: version=${report.version} coverage=${report.codeCoverage} passed=${report.hasPassedCodeCoverageCheck} released=${report.isReleased} validationSkipped=${report.validationSkipped} ancestor=${report.ancestorId ? 'yes' : 'none'}`);
+    expect(report.subscriberPackageVersionId).toBe(v04t);
+    expect(report.packageId).toBe(pkgId);
+    // An existing 08c request, found without a day limit.
+    const all = await sf.json<unknown[]>(['package', 'version', 'create', 'list', '--target-dev-hub', hubAlias!], { cwd: dir, timeoutMs: 300_000 });
+    const some = (all.result as Array<{ Id?: string; Package2Id?: string; Status?: string }>).find(r => r.Package2Id === pkgId && r.Id);
+    expect(some).toBeDefined();
+    const req = await fetchRequest(sf, hubAlias!, some!.Id!, c);
+    console.log(`LIVE request: status=${req.status} has04t=${!!req.subscriberPackageVersionId} errors=${req.errors.length}`);
+    expect(req.requestId).toBe(some!.Id);
+    expect(req.status).toBe(some!.Status);
+    // The command history must contain no create command: this test is read-only.
+    expect(history.list().some(h => /package version create(?! (list|report))/.test(h.display))).toBe(false);
+    cleanup(dir);
+  }, 580_000);
 });

@@ -84,6 +84,18 @@
           "type": "number", "default": 60, "minimum": 1, "maximum": 600,
           "description": "Minutes to wait for deployments and Apex test runs. A local timeout never cancels remote jobs."
         },
+        "releasepilot.installationKeyPolicy": {
+          "type": "string", "enum": ["require", "allow-bypass"], "default": "require",
+          "description": "require: every package version needs an installation key (asked at build time, never stored). allow-bypass: an empty key may be used after an explicit confirmation."
+        },
+        "releasepilot.buildWaitMinutes": {
+          "type": "number", "default": 90, "minimum": 1, "maximum": 720,
+          "description": "How long ReleasePilot tracks a package build locally. A timeout never cancels the build; retrying continues tracking the same request."
+        },
+        "releasepilot.buildPollSeconds": {
+          "type": "number", "default": 15, "minimum": 5, "maximum": 120,
+          "description": "Seconds between package build status checks."
+        },
         "releasepilot.stepTimeoutMinutes": {
           "type": "number", "default": 60, "minimum": 1, "maximum": 720,
           "description": "Local wait timeout for a workflow step. A timeout does not cancel remote Salesforce jobs."

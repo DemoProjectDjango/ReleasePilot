@@ -4,14 +4,15 @@ import { StepId } from '../core/models';
 export const BOOLEAN_SETTINGS = ['allowDirtySource', 'deployBeforeTests'] as const;
 export const ENUM_SETTINGS: Record<string, readonly string[]> = {
   severityGate: ['none', 'critical', 'high', 'moderate', 'low'],
-  testLevel: ['RunLocalTests', 'RunAllTestsInOrg']
+  testLevel: ['RunLocalTests', 'RunAllTestsInOrg'],
+  installationKeyPolicy: ['require', 'allow-bypass']
 };
-export type SettingKey = 'coverageTargetPercent' | 'logRetentionEntries' | 'stepTimeoutMinutes' | 'testWaitMinutes' | 'severityGate' | 'testLevel' | typeof BOOLEAN_SETTINGS[number];
+export type SettingKey = 'coverageTargetPercent' | 'logRetentionEntries' | 'stepTimeoutMinutes' | 'testWaitMinutes' | 'severityGate' | 'testLevel' | 'installationKeyPolicy' | 'buildWaitMinutes' | 'buildPollSeconds' | typeof BOOLEAN_SETTINGS[number];
 
 export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'run' | 'retry' | 'cancel'; stepId: StepId }
-  | { type: 'resume' | 'newRun' | 'showLogs' | 'refresh' | 'discover' | 'retrievePreview' | 'retrieveApply' | 'rerunFailed' | 'exportSummary' }
+  | { type: 'resume' | 'newRun' | 'showLogs' | 'refresh' | 'discover' | 'retrievePreview' | 'retrieveApply' | 'rerunFailed' | 'exportSummary' | 'refreshBuild' }
   | { type: 'openFile'; key: string }
   | { type: 'openReport' | 'exportReport'; ref: string }
   | { type: 'triage' | 'untriage' | 'applyFix'; key: string }
@@ -23,7 +24,9 @@ export const SETTINGS: Record<string, { min: number; max: number }> = {
   coverageTargetPercent: { min: 0, max: 100 },
   logRetentionEntries: { min: 100, max: 50000 },
   stepTimeoutMinutes: { min: 1, max: 720 },
-  testWaitMinutes: { min: 1, max: 600 }
+  testWaitMinutes: { min: 1, max: 600 },
+  buildWaitMinutes: { min: 1, max: 720 },
+  buildPollSeconds: { min: 5, max: 120 }
 };
 const REF_RE = /^[^\u0000\r\n]{1,2000}$/;
 const ALIAS_RE = /^[A-Za-z0-9_.@+-]{1,128}$/;
@@ -48,6 +51,7 @@ export function parseMessage(raw: unknown): WebviewMessage | undefined {
     case 'retrieveApply':
     case 'rerunFailed':
     case 'exportSummary':
+    case 'refreshBuild':
       return { type: m.type };
     case 'openFile':
     case 'triage':

@@ -40,7 +40,7 @@ export function resolveSfLauncher(
 }
 
 export class SfError extends Error {
-  constructor(readonly code: string, message: string, readonly remediation?: string, readonly detail?: string) {
+  constructor(readonly code: string, message: string, readonly remediation?: string, readonly detail?: string, readonly result?: unknown) {
     super(message);
   }
 }
@@ -138,7 +138,7 @@ export class SfCli {
     }
     const message = redact(env?.message ?? (res.stderr.trim() || `Command exited with code ${res.exitCode}`));
     const info = explainError(env?.name, message);
-    throw new SfError(info.code, message, info.remediation);
+    throw new SfError(info.code, message, info.remediation, undefined, env?.result);
   }
 
   async text(args: string[], opts: SfRunOptions): Promise<string> {

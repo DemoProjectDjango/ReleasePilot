@@ -73,7 +73,10 @@ export class DashboardPanel {
         severityGate: cfg.get<string>('severityGate', 'high'),
         testLevel: cfg.get<string>('testLevel', 'RunLocalTests'),
         testWaitMinutes: cfg.get<number>('testWaitMinutes', 60),
-        ruleSelectors: cfg.get<string[]>('ruleSelectors', ['Recommended'])
+        ruleSelectors: cfg.get<string[]>('ruleSelectors', ['Recommended']),
+        installationKeyPolicy: cfg.get<string>('installationKeyPolicy', 'require'),
+        buildWaitMinutes: cfg.get<number>('buildWaitMinutes', 90),
+        buildPollSeconds: cfg.get<number>('buildPollSeconds', 15)
       }
     });
   }

@@ -1,5 +1,49 @@
 # ReleasePilot — Implementation Status
 
+## Slice 4 — Managed 2GP Package Creation
+
+**State:** Implemented. Everything except the actual `sf package version create` call is verified against the real Dev Hub (read-only). **No package version was created during development**: the create path, polling and verification are tested with a mocked CLI only, and the first real build should be watched.
+
+### Completed features
+- **Package Readiness step** (read-only against the Dev Hub): managed-package type; `versionNumber` validity and that it is higher than every released version (equal or lower is a failure); ancestry (required once any version is released; HIGHEST, a released 04t or alias, or a released version number are accepted, NONE is rejected, `--skip-ancestor-check` is never used); dependencies (alias resolution, version numbers, explicit 04t looked up in the Dev Hub); no queued/in-progress build for the package; clean committed source (or explicit allowance); and proof that the passed analysis and test runs describe exactly the current source fingerprint.
+- **Create Beta Package step:**
+  - Always uses full validation and `--code-coverage`. The argument builder cannot emit `--skip-validation`, `--skip-ancestor-check` or `--async-validation`.
+  - Tags the build with the Git commit and branch.
+  - Requires an installation-key decision. The key is asked for at build time, never stored or written to reports, and redacted from logs and command history. Bypass needs the `allow-bypass` policy plus an explicit confirmation.
+  - A modal names the Dev Hub (alias and org ID), package, version and source before anything is created.
+  - Runs without `--wait`, so the 08c request is returned and **persisted immediately**, then polled (configurable interval and local limit).
+  - Verifies the result with `sf package version report` rather than trusting the create response: correct package, validation not skipped, not already released, package coverage present and at least 75%, and Salesforce's own coverage check passed.
+- **No duplicate builds:** an in-flight request of ours is resumed; identical source that already produced a 04t is not rebuilt; the Dev Hub is checked for running builds immediately before creating; if the CLI errors after registering a request, the 08c is recovered from the error payload. A local timeout is Needs Review and retrying continues the same request.
+- **Source binding:** each candidate records the source fingerprint, branch, tag, Dev Hub org and key mode. Editing source afterwards marks the build Stale (a new build is required), consistent with the spec.
+- **Package tab:** Check Readiness, Create Beta Package / Continue Tracking Build, Refresh Build Status; readiness checks table with text status; per-build card with package, Dev Hub, version, 08c, 04t, status, errors, coverage and check result, released flag, branch/tag, key mode, fingerprint and timestamps.
+- **Reports:** readiness report, build request and version report are saved as evidence and appear under Reports & Artifacts (Open / Export).
+- **Gates:** Package Readiness cannot run before tests pass; Create Beta Package cannot run before readiness passes; Clean-install QA stays blocked until a promotable 04t exists. A build whose coverage check failed is recorded but marked `PACKAGE_NOT_PROMOTABLE`.
+
+### Requirement IDs
+FR-14, FR-15, FR-16, FR-22, FR-27 (build resume after restart), FR-28 (build reports), NFR-02, NFR-03, NFR-04 (Dev Hub identity in the confirmation), NFR-05, NFR-06, NFR-16 (confirmation before consuming a build), NFR-20.
+
+### Files created or modified
+New: `src/packaging/{versions,parsers,store,readiness,build}.ts`, `src/executors/packaging.ts`, `src/test/slice4.test.ts`. Modified: `src/adapters/sfCli.ts` (SfError carries the CLI result), `src/extension.ts`, `src/ui/{messages,dashboardPanel}.ts`, `media/dashboard.js`, `package.json` (installationKeyPolicy, buildWaitMinutes, buildPollSeconds), `src/test/live.test.ts`.
+
+### Tests executed
+| Category | What | Result |
+|---|---|---|
+| Mocked | argument construction and forbidden flags, key redaction, readiness rules (ancestry, versions, dependencies, in-flight, source, validation freshness), store persistence, polling and timeout, 08c recovery, every build outcome (success, bypass, declined, key cancelled, build error, low coverage, validation skipped, wrong package, timeout then resume, no rebuild, running build, rejected creation, stale readiness) | pass |
+| **Live read-only** | real `package version list`, `create list`, `create report`, `package version report` parsed from the actual Dev Hub (22 versions, a real 04t report, a real 08c request); asserted that no create command was issued | pass |
+| Default suite | `npm run check` | 116 passed, 5 live/local-tool tests skipped by default; all 121 pass with `RP_LIVE=1` |
+| **Not run** | `sf package version create` against a real Dev Hub; VS Code UI check | see limitations |
+
+### Known limitations
+- The create command's JSON when run without `--wait` (status `Queued`, `Id` present) is assumed from CLI behaviour and documentation, and is handled defensively, but it is unverified against a real build.
+- Salesforce's rule that every package trigger needs coverage is enforced through `HasPassedCodeCoverageCheck`; ReleasePilot does not independently inspect trigger coverage.
+- Version-number rules are a conservative subset of Salesforce's; Salesforce remains the final authority at build time and its error is surfaced.
+- The Salesforce CLI only accepts the installation key as a command-line argument, so it is briefly visible to other processes of the same user on that machine; ReleasePilot redacts it everywhere it records anything.
+- Only the last 3 days of build requests are inspected for in-flight builds (older still-running requests are not expected).
+- Package version dependencies are verified only for explicit 04t IDs, not for `LATEST`-style ranges.
+- The Package tab has not been exercised in a live VS Code window.
+
+### Recommended next: Slice 5 — scratch org automation, installation and QA (after approval).
+
 ## Slice 3 — Code Analyzer, Automated Testing, and Reports
 
 **State:** Implemented. Static analysis is verified end to end against the real Code Analyzer plugin. Apex testing and deployment are verified only with a mocked CLI because no validation org was designated, so no test run or deployment was executed in any real org.

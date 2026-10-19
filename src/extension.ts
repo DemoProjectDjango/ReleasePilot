@@ -9,14 +9,17 @@ import { SfCli, SfError, resolveSfLauncher } from './adapters/sfCli';
 import { SeverityGate, applyFix, gateBlockers } from './analysis/analyzer';
 import { TriageStore } from './analysis/triage';
 import { Logger } from './core/logger';
-import { StepId } from './core/models';
+import { StepId, StepStatus } from './core/models';
 import { DiscoveryService } from './discovery/discoveryService';
 import { RetrievalService } from './discovery/retrieval';
 import { FileStateStore } from './engine/stateStore';
 import { WorkflowEngine } from './engine/workflowEngine';
 import { createExecutors } from './executors/executors';
 import { QualitySettings, createQualityExecutors } from './executors/quality';
+import { PackagingSettings, createPackagingExecutors } from './executors/packaging';
 import { ReportWriter } from './executors/reportWriter';
+import { abortableSleep, fetchRequest } from './packaging/build';
+import { PackagingStore } from './packaging/store';
 import { TestLevel, evaluateApex, runApexTests } from './testing/apex';
 import { QualityStore } from './testing/qualityStore';
 import { buildSummaryMarkdown } from './testing/summary';
@@ -34,6 +37,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const reports = new ReportWriter(reportsDir);
   const quality = new QualityStore(path.join(storageDir, 'quality-state.json'));
   const triage = new TriageStore(path.join(storageDir, 'triage.json'));
+  const packaging = new PackagingStore(path.join(storageDir, 'packaging.json'));
 
   const output = vscode.window.createOutputChannel('ReleasePilot');
   context.subscriptions.push(output);
@@ -69,7 +73,36 @@ export function activate(context: vscode.ExtensionContext): void {
   const confirmRemote = async (title: string, detail: string): Promise<boolean> =>
     (await vscode.window.showWarningMessage(title, { modal: true, detail }, 'Continue')) === 'Continue';
 
-  const engine = new WorkflowEngine({
+  const packagingSettings = (): PackagingSettings => ({
+    pollSeconds: cfg().get<number>('buildPollSeconds', 15),
+    buildWaitMinutes: cfg().get<number>('buildWaitMinutes', 90),
+    installationKeyPolicy: cfg().get<'require' | 'allow-bypass'>('installationKeyPolicy', 'require')
+  });
+
+  /** Asks for the installation key without storing it; empty means bypass only if policy allows and the user confirms. */
+  const askInstallationKey = async (policy: PackagingSettings['installationKeyPolicy']): Promise<{ key?: string; bypass?: boolean } | undefined> => {
+    const key = await vscode.window.showInputBox({
+      title: 'Installation key for the new package version',
+      prompt: policy === 'require'
+        ? 'An installation key is required by policy. It is passed to the Salesforce CLI and never stored by ReleasePilot.'
+        : 'Enter an installation key, or leave empty to create the version WITHOUT one (you will be asked to confirm).',
+      password: true,
+      ignoreFocusOut: true,
+      validateInput: v => v && !/^[^\s\u0000-\u001f]{1,100}$/.test(v)
+        ? 'Use 1-100 characters without spaces.'
+        : (policy === 'require' && !v ? 'An installation key is required by policy.' : undefined)
+    });
+    if (key === undefined) {
+      return undefined;
+    }
+    if (key) {
+      return { key };
+    }
+    return (await confirmRemote('Create the package version WITHOUT an installation key?',
+      'Anyone who has the install link for this beta version will be able to install it.')) ? { bypass: true } : undefined;
+  };
+
+  const engine: WorkflowEngine = new WorkflowEngine({
     store,
     logger,
     executors: {
@@ -77,6 +110,12 @@ export function activate(context: vscode.ExtensionContext): void {
       ...createQualityExecutors({
         sf, runner, discovery, reports, reportsDir, quality, triage, getRoot,
         settings: qualitySettings, git: root => git.snapshot(root), confirm: confirmRemote
+      }),
+      ...createPackagingExecutors({
+        sf, discovery, reports, store: packaging, quality, getRoot, git: root => git.snapshot(root),
+        allowDirty: () => cfg().get<boolean>('allowDirtySource', false),
+        stepStatus: (id: StepId): StepStatus => engine.getState().run.steps[id].status,
+        confirm: confirmRemote, askInstallationKey, settings: packagingSettings, sleep: abortableSleep
       })
     },
     canExecute: () => trusted() ? { allowed: true } : { allowed: false, reason: 'Running workflow steps requires a trusted workspace.' },
@@ -144,10 +183,19 @@ export function activate(context: vscode.ExtensionContext): void {
     };
   };
 
+  const packagingView = () => {
+    const snap = discovery.snapshot;
+    const pkgId = snap.selectedPackage?.id;
+    const all = packaging.candidates().filter(c => !pkgId || c.packageId === pkgId);
+    return { candidates: all.slice(0, 20), readiness: packaging.readiness(), devHub: snap.devHub && { alias: snap.devHub.alias, username: snap.devHub.username, orgId: snap.devHub.orgId },
+      package: snap.selectedPackage, versionNumber: snap.project?.packageDirectories.find(p => p.packageId && p.packageId === pkgId)?.versionNumber };
+  };
+
   const view = () => ({
     discovery: discovery.snapshot,
     retrieval: retrieval.lastPreview,
     quality: qualityView(),
+    packaging: packagingView(),
     busy,
     notice,
     selectedRoot: getRoot(),
@@ -484,6 +532,22 @@ export function activate(context: vscode.ExtensionContext): void {
       case 'rerunFailed':
         await rerunFailedTests();
         break;
+      case 'refreshBuild': {
+        const root = getRoot();
+        const hubOrg = discovery.snapshot.devHub;
+        const pkgId = discovery.snapshot.selectedPackage?.id;
+        const live = pkgId && hubOrg ? packaging.inFlight(pkgId, hubOrg.orgId) : undefined;
+        if (!root || !trusted() || !hubOrg || !live) {
+          notice = { level: 'info', text: 'There is no in-flight package build to refresh.' };
+          break;
+        }
+        await withBusy('Refreshing build status', async () => {
+          const r = await fetchRequest(sf, hubOrg.alias ?? hubOrg.username, live.requestId, { root });
+          packaging.upsert({ ...live, status: r.status, errors: r.errors, subscriberPackageVersionId: r.subscriberPackageVersionId ?? live.subscriberPackageVersionId, lastPolledAt: new Date().toISOString() });
+          notice = { level: 'info', text: `Request ${live.requestId} is ${r.status}. Run the Create Beta Package step again to finish verification.` };
+        });
+        break;
+      }
       case 'setSetting': {
         const map: Record<string, string> = { testWaitMinutes: 'testWaitMinutes' };
         await cfg().update(map[msg.key] ?? msg.key, msg.value, vscode.ConfigurationTarget.Workspace);
