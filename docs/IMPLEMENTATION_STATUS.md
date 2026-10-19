@@ -1,5 +1,64 @@
 # ReleasePilot — Implementation Status
 
+## Overall status (all six slices built)
+
+| Slice | State | Verification level |
+|---|---|---|
+| 1 Foundation and UI | built | automated; UI not exercised in a live window |
+| 2 Discovery and CLI adapter | built | automated; live read-only org/package queries |
+| 3 Analysis, tests, reports | built | automated; **real Code Analyzer run**; Apex/deploy mocked |
+| 4 Package creation | built | automated; live read-only package queries; create mocked |
+| 5 Scratch org QA | built | automated; live read-only org/package queries; create/install mocked |
+| 6 Readiness and promotion | built | automated; live read-only gate inputs; promote mocked |
+
+**Not yet verified anywhere (needs a supervised pilot):** every command that changes a Salesforce environment: `apex run test`, `project deploy start`, `package version create`, `org create scratch`, `package install`, `org assign permset`, `apex run`, `org delete scratch`, `package version promote`. The extension has also never been launched in a VS Code window. Until those are done, the product should be treated as feature-complete but not field-proven.
+
+
+## Slice 6 — Release Readiness and Controlled Promotion
+
+**State:** Implemented. All Salesforce-derived gates are verified against your real Dev Hub, read-only. **No version was promoted during development, and the promote command was never run against any org**: promotion is tested with a mocked CLI only. All six slices are now built; see "Overall status" below for what remains unverified.
+
+### Completed features
+- **Release Readiness step** re-reads Salesforce and the saved evidence and evaluates 15 gates for the exact candidate 04t, producing a consolidated report (JSON, Markdown and HTML, all saved as evidence and exportable):
+  - *Required, never overridable:* candidate identity; live package-version state (belongs to the package, not already released); package-version coverage at least 75% with Salesforce's own coverage check passed; full validation (not skipped); package built from exactly the current source; Dev Hub/package identity from Preflight; static analysis (current, no untriaged blockers, no scanner warnings); Apex tests (current, passing, local source deployed); signed clean-install QA for this exact version and source; signed upgrade QA when an upgrade path exists (an unsupported path is a blocker with the reason); a released major.minor.patch cannot be reused.
+  - *Local policy, overridable with a written justification:* internal org-wide coverage target, LWC Jest, uncommitted source. An override records reason (min. 15 characters), owner and time, applies only to that version and source, and appears in the report.
+  - *Advisory:* installation key bypass.
+- **Evidence hash** binds the 04t, Dev Hub, package, source fingerprint, every gate result and the content hash of every evidence file. Anything that changes it invalidates the review.
+- **Approve & Promote:** the sequence is (1) a passed, current review; (2) a modal listing package, Dev Hub (alias and org ID), version, 04t, validation and coverage summary, remaining warnings and the permanent impact; (3) typing the exact 04t; (4) a single-use approval token (10-minute lifetime) bound to that 04t and evidence hash; (5) the engine's own approval gate. No path promotes automatically after a build.
+- **Promotion executor:** queries Salesforce first and never promotes an already-released version (verification-only, recorded as such); re-gathers the evidence and refuses if it drifted from the review; writes an "attempting" record **before** the irreversible call; builds exactly `sf package version promote --package <04t> --target-dev-hub <hub> --no-prompt`; then re-queries the version report. The step passes only if Salesforce shows the same 04t in the same package as Released. A CLI error followed by a Released report counts as success; a "success" followed by an unreleased report is a failure; an unreadable result is Needs Review and a retry re-queries before anything else.
+- **Receipt and history:** promotion receipt (package, Dev Hub, 04t, version, approver, evidence hash, source fingerprint, coverage, overrides, install links, next steps) plus a release-history entry; History tab lists released versions.
+- **Next-step guidance:** official production and sandbox install links, key advice, and Partner Console / AppExchange steps (explicitly outside ReleasePilot), and the reminder to move to a higher version number.
+- **Release tab** with verdict banner, summary, gate table with override controls, blockers, warnings, report Open/Export, promotion record and history.
+
+### Official-rule check
+Salesforce documentation: promotion needs at least 75% package-version coverage and every trigger covered; versions created with skip-validation cannot be promoted; only one beta can be promoted per version number; promotion cannot be reversed. These are implemented as hard gates.
+
+### Requirement IDs
+FR-24, FR-25, FR-26, FR-27 (promotion reconciliation), FR-28 (reports in Markdown/JSON/HTML), NFR-04, NFR-05, NFR-06, NFR-11 (audit trail: approver, timestamps, hashes, IDs, receipt), NFR-17; acceptance scenarios 8, 9 and 10 of the spec (stale approval, blocked promotion, verified release).
+
+### Files created or modified
+New: `src/release/{gates,store,promote}.ts`, `src/executors/release.ts`, `src/test/slice6.test.ts`, `docs/POST_MVP_PROPOSALS.md`. Modified: `src/extension.ts`, `src/ui/messages.ts`, `media/dashboard.js`, `src/test/live.test.ts`.
+
+### Tests executed
+| Category | What | Result |
+|---|---|---|
+| Mocked / unit | each gate failing alone (26 hard-gate cases, none overridable), policy gates and their overrides (scoped to version and source), evidence-hash binding, Markdown/HTML rendering with escaping and redaction, store persistence and corruption, promote command construction, install links | pass |
+| Mocked executors | review passed / blocked / needs-review / override then pass; promotion refused without review or approval (missing, wrong version, wrong hash, expired); approved promotion with intent recorded first; single-use token; unreleased after "success"; ambiguous CLI error; unverifiable result then safe retry; already-released verify-only; drift after review (test result changed, evidence file tampered); wrong package after promotion | pass |
+| **Live read-only** | real `package version list` and `report` feed the real gate logic: coverage, state, validation and uniqueness gates agree with Salesforce's data; local-evidence gates correctly keep the report not ready; no promote command issued | pass |
+| Default suite | `npm run check` | 206 passed, 7 live/local-tool tests skipped by default |
+| **Not run** | `sf package version promote` against a real Dev Hub; the promote result JSON; VS Code UI check | see limitations |
+
+### Known limitations
+- The promote command's JSON is assumed; ReleasePilot deliberately does not rely on it and verifies via the version report, but a real promotion has never been executed by this extension.
+- Uniqueness is checked on major.minor.patch; Salesforce's rule is phrased per minor version, so Salesforce can still refuse a promotion this check allowed (its message is shown and the outcome re-verified).
+- Package-level trigger coverage relies on Salesforce's `HasPassedCodeCoverageCheck`.
+- The approval is a typed 04t plus the local user name; there is no second-person (four-eyes) approval or identity provider.
+- The Release tab, modal wording and the whole dashboard have not been exercised in a live VS Code window.
+- Partner Console, AppExchange listing and security review are not automated (out of scope for v1).
+
+### Recommended next
+Manual acceptance in the Extension Development Host, then a supervised pilot with one real product on a throwaway/test package, then the proposals in `docs/POST_MVP_PROPOSALS.md`.
+
 ## Slice 5 — Scratch Org Automation, Installation, and QA
 
 **State:** Implemented. Read-only queries are verified against your real orgs. **No scratch org was created, no package was installed, and nothing was assigned, opened or deleted during development**: the creation, installation, permission, script, open and delete paths are tested with a stateful mocked CLI only, so the first real run should be watched.

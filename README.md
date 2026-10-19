@@ -4,7 +4,7 @@ Guided, evidence-based release automation for Salesforce managed 2GP packages, i
 Publisher: TwinStack Solutions. Spec: [docs/ReleasePilot_Spec_v1.1.md](docs/ReleasePilot_Spec_v1.1.md).
 
 ## Status
-Slices 1-5 are implemented: dashboard, workflow engine, project/org/package discovery, Preflight and Source Ready, conflict-safe retrieval, Code Analyzer, Apex/LWC tests and coverage, package readiness and beta package creation, scratch-org QA and upgrade testing. Release readiness and promotion arrive in Slice 6, so they cannot run yet. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md).
+All six slices are implemented: dashboard, workflow engine, discovery, Code Analyzer and tests, package readiness and creation, scratch-org QA and upgrade testing, release readiness and controlled promotion. Everything that changes a Salesforce environment is tested with a mocked CLI only and still needs a supervised pilot. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md).
 
 ## Develop
 ```powershell

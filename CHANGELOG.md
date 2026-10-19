@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ### Added
+- Slice 6: release readiness with 15 gates and hash-bound evidence, overridable local policy vs hard platform blockers, JSON/Markdown/HTML reports, typed-confirmation single-use promotion approval, promotion with intent recording and Salesforce verification, receipts, release history, Release tab.
 - Slice 5: scratch org QA automation (create, install, verify, permission sets, scripts, open), automated upgrade testing with Salesforce's beta rules, manual QA checklist with signed results, reconciliation and cleanup, QA tab.
 - Slice 4: package readiness checks, beta package creation with persisted 08c tracking, 04t verification against the version report, duplicate-build protection, installation-key handling, Package tab.
 - Slice 3: Code Analyzer v5 integration with incomplete-scan detection, triage, reviewed fixes, Apex tests with optional deploy and coverage gating, LWC Jest, failed-test rerun, Quality tab, report open/export and Markdown quality summary.

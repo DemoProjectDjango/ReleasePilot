@@ -18,13 +18,16 @@ import { createExecutors } from './executors/executors';
 import { QualitySettings, createQualityExecutors } from './executors/quality';
 import { PackagingSettings, createPackagingExecutors } from './executors/packaging';
 import { ReportWriter } from './executors/reportWriter';
-import { abortableSleep, fetchRequest } from './packaging/build';
+import { abortableSleep, fetchRequest, fetchVersionReport } from './packaging/build';
 import { PackagingStore } from './packaging/store';
 import { QaSettings, createQaExecutors, summary as qaSummary } from './executors/qa';
 import { deleteScratch, listScratchOrgs, openOrg } from './qa/ops';
 import { validateScratchDefinition } from './qa/scratchDef';
 import { signOffBlockers } from './qa/signoff';
 import { QaStore } from './qa/store';
+import { ApprovalToken, createReleaseExecutors } from './executors/release';
+import { installLinks, nextSteps } from './release/promote';
+import { ReleaseStore } from './release/store';
 import { TestLevel, evaluateApex, runApexTests } from './testing/apex';
 import { QualityStore } from './testing/qualityStore';
 import { buildSummaryMarkdown } from './testing/summary';
@@ -44,6 +47,9 @@ export function activate(context: vscode.ExtensionContext): void {
   const triage = new TriageStore(path.join(storageDir, 'triage.json'));
   const packaging = new PackagingStore(path.join(storageDir, 'packaging.json'));
   const qa = new QaStore(path.join(storageDir, 'qa.json'));
+  const release = new ReleaseStore(path.join(storageDir, 'release.json'));
+  /** One-shot approval captured from a typed confirmation; it is consumed by the promotion step. */
+  let approval: ApprovalToken | undefined;
 
   const output = vscode.window.createOutputChannel('ReleasePilot');
   context.subscriptions.push(output);
@@ -152,6 +158,12 @@ export function activate(context: vscode.ExtensionContext): void {
       ...createQaExecutors({
         sf, discovery, reports, qa, packaging, getRoot, git: root => git.snapshot(root), settings: qaSettings,
         confirm: confirmRemote, askKey: askQaKey, sleep: abortableSleep
+      }),
+      ...createReleaseExecutors({
+        sf, discovery, reports, reportsDir, quality, packaging, qa, release, triage, getRoot, git: root => git.snapshot(root),
+        steps: () => engine.getState().run.steps,
+        settings: () => ({ severityGate: qualitySettings().severityGate, coverageTarget: qualitySettings().coverageTargetPercent, allowDirty: cfg().get<boolean>('allowDirtySource', false) }),
+        takeApproval: () => { const a = approval; approval = undefined; return a; }
       })
     },
     canExecute: () => trusted() ? { allowed: true } : { allowed: false, reason: 'Running workflow steps requires a trusted workspace.' },
@@ -227,6 +239,18 @@ export function activate(context: vscode.ExtensionContext): void {
       package: snap.selectedPackage, versionNumber: snap.project?.packageDirectories.find(p => p.packageId && p.packageId === pkgId)?.versionNumber };
   };
 
+  const releaseView = () => {
+    const report = release.lastReport();
+    const versionId = report?.candidate?.versionId;
+    const promo = versionId ? release.promotion(versionId) : undefined;
+    const released = promo?.status === 'released';
+    return {
+      report, history: release.history().slice(0, 30), promotion: promo,
+      nextSteps: released && versionId ? nextSteps(versionId, report?.candidate?.keyMode === 'key') : [],
+      links: released && versionId ? installLinks(versionId) : undefined
+    };
+  };
+
   const qaView = () => {
     const root = getRoot();
     const hubId = discovery.snapshot.devHub?.orgId;
@@ -240,6 +264,7 @@ export function activate(context: vscode.ExtensionContext): void {
     quality: qualityView(),
     packaging: packagingView(),
     qa: qaView(),
+    release: releaseView(),
     busy,
     notice,
     selectedRoot: getRoot(),
@@ -429,6 +454,89 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const stepOfKind = (k: 'fresh-install' | 'upgrade'): StepId => (k === 'upgrade' ? 'upgrade-qa' : 'clean-install-qa');
+
+  const overrideGate = async (gateId: string) => {
+    const report = release.lastReport();
+    const gate = report?.gates.find(g => g.id === gateId);
+    if (!report?.candidate || !gate || gate.kind !== 'policy' || gate.status !== 'fail') {
+      notice = { level: 'error', text: 'Only a failing local policy check can be overridden. Platform rules and required evidence cannot.' };
+      return;
+    }
+    const reason = await vscode.window.showInputBox({
+      title: `Override: ${gate.title}`,
+      prompt: 'Why is it acceptable to release despite this? (min. 15 characters; recorded with your name, the version and the time, and shown in the report)',
+      validateInput: v => (v.trim().length < 15 ? 'Please give a justification of at least 15 characters.' : undefined)
+    });
+    if (!reason) {
+      return;
+    }
+    release.addOverride({ gateId, versionId: report.candidate.versionId, sourceFingerprint: report.sourceFingerprint ?? '', reason: reason.trim(), owner: os.userInfo().username, at: new Date().toISOString() });
+    logger.log('warn', 'release', `Policy override recorded for "${gate.title}" on ${report.candidate.versionId}: ${reason.slice(0, 80)}`);
+    engine.markStale('release-review', 'release overrides changed');
+    notice = { level: 'info', text: 'Override recorded. Run Release Readiness again to apply it.' };
+  };
+
+  const promoteFlow = async () => {
+    const root = getRoot();
+    const report = release.lastReport();
+    const snap = discovery.snapshot;
+    const reviewStep = engine.getState().run.steps['release-review'];
+    if (!root || !trusted() || !report?.candidate || !snap.devHub || reviewStep.status !== 'passed' || reviewStep.fingerprint !== report.evidenceHash || !report.ready) {
+      notice = { level: 'error', text: 'Promotion needs a passed, current Release Readiness review. Run it first.' };
+      return;
+    }
+    const hub = snap.devHub.alias ?? snap.devHub.username;
+    const versionId = report.candidate.versionId;
+    await withBusy('Promoting package version', async () => {
+      // Read-only first: if Salesforce already shows it released, only verify (no approval for a no-op).
+      const live = await fetchVersionReport(sf, hub, versionId, { root });
+      if (live.isReleased) {
+        const res = await engine.runStep('promotion', { approved: true });
+        notice = { level: res.ok && res.status === 'passed' ? 'info' : 'error', text: res.ok ? 'The version is already released in Salesforce; verified and recorded without running promote.' : res.message };
+        return;
+      }
+      const lines = [
+        `Package: ${report.package.name} (${report.package.id})`,
+        `Dev Hub: ${report.devHub.alias} (${report.devHub.orgId})`,
+        `Version: ${report.candidate!.version ?? ''}   04t: ${versionId}`,
+        `Source: ${(report.sourceFingerprint ?? '').slice(0, 12)}   Evidence: ${report.evidenceHash.slice(0, 12)}`,
+        '',
+        `Static analysis: ${report.summary.analysis ?? 'n/a'}`,
+        `Tests: ${report.summary.tests ?? 'n/a'}`,
+        `Org-wide coverage: ${report.summary.coverage ?? 'n/a'}`,
+        `Package-version coverage: ${report.summary.packageCoverage ?? 'n/a'}`,
+        `QA: signed fresh-install${report.gates.find(g => g.id === 'upgrade-qa')?.status === 'pass' ? ' and upgrade' : ''} checklists`,
+        '',
+        report.warnings.length ? 'Remaining warnings:' : 'No remaining warnings.',
+        ...report.warnings.map(w => `  - ${w}`),
+        '',
+        'IMPACT: promotion is PERMANENT. The version becomes Released and installable in production orgs; it can never return to beta, and no other beta of this version number can be promoted.'
+      ];
+      const first = await vscode.window.showWarningMessage(`Promote ${report.package.name} ${report.candidate!.version ?? ''} to Released?`, { modal: true, detail: lines.join('\n') }, 'Continue to confirmation');
+      if (first !== 'Continue to confirmation') {
+        notice = { level: 'info', text: 'Promotion cancelled. Nothing was changed.' };
+        return;
+      }
+      const typed = await vscode.window.showInputBox({
+        title: 'Final confirmation', ignoreFocusOut: true,
+        prompt: `Type the package version ID exactly to promote it on ${hub}: ${versionId}`,
+        validateInput: v => (v.trim() === versionId ? undefined : 'The ID does not match.')
+      });
+      if (typed?.trim() !== versionId) {
+        notice = { level: 'info', text: 'Promotion cancelled. Nothing was changed.' };
+        return;
+      }
+      approval = { versionId, evidenceHash: report.evidenceHash, approver: os.userInfo().username, at: Date.now() };
+      try {
+        const res = await engine.runStep('promotion', { approved: true });
+        notice = res.ok && res.status === 'passed'
+          ? { level: 'info', text: `Salesforce confirms ${versionId} is Released.` }
+          : { level: 'error', text: res.ok ? 'Promotion did not complete; see the Errors tab. It is safe to retry: Salesforce is re-queried first.' : res.message };
+      } finally {
+        approval = undefined;
+      }
+    });
+  };
 
   const qaMark = async (envId: string, itemId: string, state: 'pass' | 'fail') => {
     const env = qa.get(envId);
@@ -686,6 +794,20 @@ export function activate(context: vscode.ExtensionContext): void {
         });
         break;
       }
+      case 'overrideGate':
+        await overrideGate(msg.gateId);
+        break;
+      case 'removeOverride': {
+        const rep = release.lastReport();
+        if (rep?.candidate) {
+          release.removeOverride(msg.gateId, rep.candidate.versionId);
+          engine.markStale('release-review', 'release overrides changed');
+        }
+        break;
+      }
+      case 'promote':
+        await promoteFlow();
+        break;
       case 'qaMark':
         await qaMark(msg.envId, msg.itemId, msg.state);
         break;

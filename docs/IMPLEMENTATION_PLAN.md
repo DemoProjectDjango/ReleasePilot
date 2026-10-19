@@ -120,5 +120,5 @@ Workspace Trust (`untrustedWorkspaces: limited`, engine refuses execution); webv
 - [x] Slice 3 analysis, tests, reports
 - [x] Slice 4 package readiness and creation
 - [x] Slice 5 scratch org QA and upgrade testing
-- [ ] Slice 6
+- [x] Slice 6 release readiness and promotion
 - [ ] Post-MVP proposals (AI remediation, CI, multi-project dashboard, security-review prep, release notes, Partner Console, push upgrades, analytics)

@@ -9,6 +9,9 @@ import { NodeProcessRunner } from '../adapters/processRunner';
 import { SfCli, resolveSfLauncher } from '../adapters/sfCli';
 import { runCodeAnalyzer } from '../analysis/analyzer';
 import { installedPackages, listScratchOrgs } from '../qa/ops';
+import { PIPELINE } from '../core/pipeline';
+import { evaluateRelease } from '../release/gates';
+import { evaluateUpgradePath } from '../qa/upgradePath';
 import { parseOrgList } from '../discovery/parsers';
 import { fetchRequest, fetchVersionReport, listAllVersions, listRecentRequests } from '../packaging/build';
 import { DiscoveryService } from '../discovery/discoveryService';
@@ -223,6 +226,55 @@ describe.skipIf(!live)('LIVE read-only QA queries', () => {
     expect(parsed).toBe(true);
     const verbs = history.list().map(h => h.display);
     expect(verbs.some(v => /org create|package install(?!ed| report)|org delete|assign|org open/.test(v))).toBe(false);
+    cleanup(dir);
+  }, 580_000);
+});
+
+/**
+ * LIVE read-only release-gate evaluation: real package-version facts from the Dev Hub feed the real gate logic.
+ * The promote command is never built or run here.
+ */
+describe.skipIf(!live)('LIVE read-only release gate evaluation', () => {
+  it('evaluates the Salesforce-derived gates on a real version', async () => {
+    const runner = new NodeProcessRunner();
+    const history = new CommandHistory();
+    const sf = new SfCli(runner, history, resolveSfLauncher());
+    const svc = new DiscoveryService(sf, new GitAdapter(runner, history));
+    const dir = fixture({ packageDirectories: [{ path: 'force-app', default: true }] });
+    const first = await svc.discover(dir);
+    let hub: { alias: string; orgId: string } | undefined;
+    let pkg: { id: string; name: string } | undefined;
+    for (const h of first.orgs.filter(o => o.isDevHub)) {
+      const snap = await svc.selectDevHub(h.alias ?? h.username);
+      if (snap.packages.length) { hub = { alias: h.alias ?? h.username, orgId: h.orgId }; pkg = snap.packages[0]; break; }
+    }
+    expect(hub && pkg).toBeTruthy();
+    const c = { root: dir };
+    const versions = await listAllVersions(sf, hub!.alias, pkg!.id, c);
+    const target = versions.find(v => !v.isReleased && v.subscriberPackageVersionId);
+    expect(target).toBeDefined();
+    const live = await fetchVersionReport(sf, hub!.alias, target!.subscriberPackageVersionId!, c);
+    const candidate = { requestId: '08c000000000000AAA', packageId: pkg!.id, packageName: pkg!.name, devHubOrgId: hub!.orgId, devHubAlias: hub!.alias, versionNumber: live.version ?? '', status: 'Success', subscriberPackageVersionId: target!.subscriberPackageVersionId, errors: [], sourceFingerprint: 'fp', keyMode: 'key' as const, createdAt: 'x' };
+    const report = evaluateRelease({
+      now: new Date().toISOString(), devHub: hub!, pkg: pkg!, candidate, live, versions, git: { fingerprint: 'fp', dirtyCount: 0 }, allowDirty: false,
+      steps: Object.fromEntries(PIPELINE.map(p => [p.id, { id: p.id, status: 'pending', attempt: 0, evidence: [] }])) as never,
+      analysisGate: 'high', triaged: new Set(), coverageTarget: 80, upgradePath: evaluateUpgradePath(versions, target!.subscriberPackageVersionId!), overrides: [], evidenceFileHashes: {}
+    });
+    const g = (id: string) => report.gates.find(x => x.id === id)!;
+    console.log(`LIVE gates for ${live.version}: coverage=${live.codeCoverage} check=${live.hasPassedCodeCoverageCheck} -> package-coverage=${g('package-coverage').status} state=${g('package-state').status} validation=${g('build-validation').status} uniqueness=${g('version-uniqueness').status} upgrade=${g('upgrade-qa').status}`);
+    expect(g('package-state').status).toBe('pass');
+    expect(g('package-coverage').status).toBe(live.codeCoverage !== undefined && live.codeCoverage >= 75 && live.hasPassedCodeCoverageCheck === true ? 'pass' : 'fail');
+    expect(g('build-validation').status).toBe(live.validationSkipped ? 'fail' : 'pass');
+    // local evidence is absent in this synthetic check, so the report must never be ready
+    expect(report.ready).toBe(false);
+    expect(g('fresh-qa').status).toBe('fail');
+    const released = versions.find(v => v.isReleased && v.subscriberPackageVersionId);
+    if (released) {
+      const rl = await fetchVersionReport(sf, hub!.alias, released.subscriberPackageVersionId!, c);
+      const r2 = evaluateRelease({ ...{ now: 'n', devHub: hub!, pkg: pkg!, candidate: { ...candidate, subscriberPackageVersionId: released.subscriberPackageVersionId }, live: rl, versions, git: { fingerprint: 'fp', dirtyCount: 0 }, allowDirty: false, steps: {} as never, analysisGate: 'high' as const, triaged: new Set<string>(), coverageTarget: 80, upgradePath: { state: 'not-applicable' as const, reason: '' }, overrides: [], evidenceFileHashes: {} } });
+      expect(r2.gates.find(x => x.id === 'package-state')!.status).toBe('fail');
+    }
+    expect(history.list().some(h => /promote/.test(h.display))).toBe(false);
     cleanup(dir);
   }, 580_000);
 });

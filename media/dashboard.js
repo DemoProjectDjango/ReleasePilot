@@ -5,7 +5,7 @@
 
   const ICON = { pending: '○', running: '↻', passed: '✓', failed: '✕', blocked: '⛔', 'needs-review': '👁', stale: '⟳', skipped: '⤼', cancelled: '⊘' };
   const LABEL = { pending: 'Pending', running: 'Running', passed: 'Passed', failed: 'Failed', blocked: 'Blocked', 'needs-review': 'Needs Review', stale: 'Stale', skipped: 'Skipped', cancelled: 'Cancelled' };
-  const TABS = [['pipeline', 'Pipeline'], ['project', 'Project'], ['quality', 'Quality'], ['package', 'Package'], ['qa', 'QA'], ['logs', 'Logs'], ['errors', 'Errors'], ['reports', 'Reports & Artifacts'], ['history', 'Release History'], ['settings', 'Settings']];
+  const TABS = [['pipeline', 'Pipeline'], ['project', 'Project'], ['quality', 'Quality'], ['package', 'Package'], ['qa', 'QA'], ['release', 'Release'], ['logs', 'Logs'], ['errors', 'Errors'], ['reports', 'Reports & Artifacts'], ['history', 'Release History'], ['settings', 'Settings']];
 
   const saved = vscode.getState() || {};
   let tab = saved.tab || 'pipeline';
@@ -293,6 +293,69 @@
     return el('div', {}, parts);
   }
 
+  const GATE_RESULT = { pass: '\u2713 Pass', fail: '\u2715 Fail', warn: '\u26A0 Warning', na: '\u2014 Not applicable', overridden: '\u26A0 Overridden' };
+  const GATE_KIND = { hard: 'Required (cannot be overridden)', policy: 'Local policy (overridable)', advisory: 'Advisory' };
+
+  function releaseTab() {
+    const rel = data.release || { history: [] };
+    const r = rel.report;
+    const steps = data.state.run.steps;
+    const busy = !!data.busy;
+    const def = id => data.definitions.find(d => d.id === id);
+    const why = id => blockedReason(def(id), steps);
+    const parts = [el('h2', {}, 'Release readiness and promotion')];
+    parts.push(el('p', { class: 'muted' }, 'Release Readiness re-checks every gate against Salesforce and the saved evidence for the exact candidate. Promotion is a separate, explicit, permanent action and is never triggered automatically.'));
+    const reviewStep = steps['release-review'];
+    const promoStep = steps.promotion;
+    const canPromote = reviewStep.status === 'passed' && promoStep.status !== 'passed' && !busy && data.workspace.trusted;
+    const files = reviewStep.evidence.filter(e => /^release-readiness-/.test(e.kind));
+    parts.push(el('div', { class: 'toolbar' },
+      el('button', { class: 'action', disabled: busy || !!why('release-review'), title: why('release-review') || '', onclick: () => post({ type: 'run', stepId: 'release-review' }) }, 'Run Release Readiness'),
+      el('button', { class: 'action', disabled: !canPromote, title: canPromote ? 'Shows the full summary, then requires you to type the 04t' : 'Release Readiness must pass first', onclick: () => post({ type: 'promote' }) }, 'Approve & Promote...'),
+      files.map(f => [el('button', { class: 'action secondary', onclick: () => post({ type: 'openReport', ref: f.ref }) }, 'Open ' + f.kind.replace('release-readiness-', '').toUpperCase()),
+        el('button', { class: 'action secondary', onclick: () => post({ type: 'exportReport', ref: f.ref }) }, 'Export ' + f.kind.replace('release-readiness-', '').toUpperCase() + '...')])));
+    const rw = why('release-review');
+    if (rw) { parts.push(el('p', { class: 'muted' }, 'Release Readiness is unavailable: ' + rw)); }
+    if (promoStep.status === 'passed') { parts.push(el('div', { class: 'banner', role: 'status' }, '\u2713 ' + (promoStep.message || 'Promoted.'))); }
+    else if (promoStep.status === 'needs-review' || promoStep.status === 'failed') { parts.push(el('div', { class: 'err', role: 'alert' }, el('strong', {}, 'Promotion: ' + promoStep.status + '. '), promoStep.failure ? promoStep.failure.message : (promoStep.message || ''),
+      promoStep.failure && promoStep.failure.remediation ? el('div', { class: 'muted' }, 'Next: ' + promoStep.failure.remediation) : null)); }
+
+    if (!r) { parts.push(el('div', { class: 'empty' }, 'No readiness report yet. Complete package QA, then run Release Readiness.')); }
+    else {
+      parts.push(el('div', { class: r.ready ? 'banner' : 'err', role: 'status' }, el('strong', {}, r.ready ? 'READY for promotion approval' : 'NOT READY'),
+        ' \u00B7 ' + r.package.name + ' ' + ((r.candidate && r.candidate.version) || '') + ' \u00B7 ' + (r.candidate ? r.candidate.versionId : 'no candidate') + ' \u00B7 Dev Hub ' + r.devHub.alias + ' (' + r.devHub.orgId + ')'));
+      parts.push(el('p', { class: 'muted' }, 'Generated ' + fmt(r.generatedAt) + ' \u00B7 source ' + (r.sourceFingerprint || '').slice(0, 12) + ' \u00B7 evidence hash ' + r.evidenceHash.slice(0, 16)));
+      parts.push(table(['Summary', ''], [['Static analysis', r.summary.analysis], ['Apex tests', r.summary.tests], ['Org-wide coverage', r.summary.coverage], ['Package-version coverage', r.summary.packageCoverage]]
+        .map(([k, v]) => el('tr', {}, el('td', {}, k), el('td', {}, v || 'n/a'))), ''));
+      parts.push(table(['Gate', 'Type', 'Result', 'Detail'], r.gates.map(g => el('tr', {},
+        el('td', {}, g.title), el('td', {}, GATE_KIND[g.kind]), el('td', {}, GATE_RESULT[g.status]),
+        el('td', {}, g.detail, g.remediation && g.status === 'fail' ? el('div', { class: 'muted' }, 'Next: ' + g.remediation) : null,
+          g.override ? el('div', { class: 'muted' }, 'Override by ' + g.override.owner + ' ' + fmt(g.override.at) + ': ' + g.override.reason) : null,
+          g.kind === 'policy' && g.status === 'fail' ? el('div', {}, el('button', { class: 'action secondary', disabled: busy, onclick: () => post({ type: 'overrideGate', gateId: g.id }) }, 'Override with justification...')) : null,
+          g.status === 'overridden' ? el('div', {}, el('button', { class: 'action secondary', disabled: busy, onclick: () => post({ type: 'removeOverride', gateId: g.id }) }, 'Remove override')) : null))), ''));
+      if (r.hardBlockers.length) { parts.push(el('h2', {}, 'Blockers that cannot be overridden')); r.hardBlockers.forEach(b => parts.push(el('div', { class: 'err' }, b))); }
+      if (r.warnings.length) { parts.push(el('h2', {}, 'Remaining warnings')); r.warnings.forEach(w => parts.push(el('div', { class: 'finding' }, w))); }
+    }
+    if (rel.promotion) {
+      parts.push(el('h2', {}, 'Promotion record'));
+      parts.push(el('p', {}, rel.promotion.versionId + ' \u00B7 ' + rel.promotion.status + ' \u00B7 approver ' + rel.promotion.approver + ' \u00B7 ' + fmt(rel.promotion.startedAt) + (rel.promotion.error ? ' \u00B7 ' + rel.promotion.error : '')));
+    }
+    if (rel.nextSteps && rel.nextSteps.length) {
+      parts.push(el('h2', {}, 'Next steps'));
+      rel.nextSteps.forEach(n => parts.push(el('div', { class: 'finding' }, n)));
+    }
+    parts.push(el('h2', {}, 'Release history'));
+    parts.push(releaseHistoryTable(rel.history));
+    return el('div', {}, parts);
+  }
+
+  function releaseHistoryTable(h) {
+    return table(['Released', 'Package', 'Version', '04t', 'Dev Hub', 'Approver', 'Package coverage', 'Receipt'], (h || []).map(e => el('tr', {},
+      el('td', {}, fmt(e.at)), el('td', {}, e.packageName), el('td', {}, e.version || '-'), el('td', {}, e.versionId), el('td', {}, e.devHubAlias + ' (' + e.devHubOrgId + ')'),
+      el('td', {}, e.approver + (e.verifiedOnly ? ' (verified only)' : '')), el('td', {}, e.coverage === undefined ? '-' : e.coverage + '%'),
+      el('td', {}, el('button', { class: 'action secondary', onclick: () => post({ type: 'openReport', ref: e.receiptRef }) }, 'Open')))), 'No versions have been released through ReleasePilot yet.');
+  }
+
   let qGroup = 'file';
   let qFilter = '';
   let qShowTriaged = false;
@@ -440,6 +503,11 @@
     'No completed release runs yet. Use "New Release Run" to archive the current run.');
   }
 
+  function historyView() {
+    const rel = (data.release && data.release.history) || [];
+    return el('div', {}, el('h2', {}, 'Released versions'), releaseHistoryTable(rel), el('h2', {}, 'Release runs'), historyTab());
+  }
+
   function settingsTab() {
     const s = data.settings;
     const field = (key, label, min, max, hint) => {
@@ -509,7 +577,7 @@
     if (!data) { app.replaceChildren(el('p', {}, 'Loading…')); return; }
     const tabs = el('nav', { role: 'tablist' }, TABS.map(([id, label]) =>
       el('button', { role: 'tab', 'aria-selected': String(tab === id), onclick: () => { tab = id; persistUi(); render(); } }, label)));
-    const view = { pipeline: pipelineTab, project: projectTab, quality: qualityTab, package: packageTab, qa: qaTab, logs: logsTab, errors: errorsTab, reports: reportsTab, history: historyTab, settings: settingsTab }[tab]();
+    const view = { pipeline: pipelineTab, project: projectTab, quality: qualityTab, package: packageTab, qa: qaTab, release: releaseTab, logs: logsTab, errors: errorsTab, reports: reportsTab, history: historyView, settings: settingsTab }[tab]();
     app.replaceChildren(
       el('h1', {}, 'ReleasePilot'),
       el('div', { class: 'muted' }, 'Salesforce managed 2GP release automation · TwinStack Solutions'),
