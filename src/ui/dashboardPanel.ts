@@ -76,7 +76,11 @@ export class DashboardPanel {
         ruleSelectors: cfg.get<string[]>('ruleSelectors', ['Recommended']),
         installationKeyPolicy: cfg.get<string>('installationKeyPolicy', 'require'),
         buildWaitMinutes: cfg.get<number>('buildWaitMinutes', 90),
-        buildPollSeconds: cfg.get<number>('buildPollSeconds', 15)
+        buildPollSeconds: cfg.get<number>('buildPollSeconds', 15),
+        qaOrgDurationDays: cfg.get<number>('qaOrgDurationDays', 7),
+        qaWaitMinutes: cfg.get<number>('qaWaitMinutes', 30),
+        qaSecurityType: cfg.get<string>('qaSecurityType', 'AdminsOnly'),
+        openOrgAfterInstall: cfg.get<boolean>('openOrgAfterInstall', true)
       }
     });
   }

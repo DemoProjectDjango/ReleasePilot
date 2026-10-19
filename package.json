@@ -96,6 +96,22 @@
           "type": "number", "default": 15, "minimum": 5, "maximum": 120,
           "description": "Seconds between package build status checks."
         },
+        "releasepilot.scratchDefinitionFile": {
+          "type": "string", "default": "config/project-scratch-def.json",
+          "description": "Project-relative scratch org definition used for QA orgs. QA orgs are always created without a namespace so the managed package can be installed."
+        },
+        "releasepilot.qaOrgDurationDays": { "type": "number", "default": 7, "minimum": 1, "maximum": 30, "description": "Days before a QA scratch org expires." },
+        "releasepilot.qaWaitMinutes": { "type": "number", "default": 30, "minimum": 1, "maximum": 120, "description": "Minutes to wait for scratch org creation and each package installation." },
+        "releasepilot.qaSecurityType": { "type": "string", "enum": ["AdminsOnly", "AllUsers"], "default": "AdminsOnly", "description": "Security access type used when installing the package into QA orgs." },
+        "releasepilot.qaPermissionSets": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Permission sets assigned to the QA org's admin user after installation (API names, including any namespace prefix)." },
+        "releasepilot.qaInitScripts": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project-relative .apex files run in a fresh QA org after installation. They execute in the new scratch org only, and are listed in the confirmation prompt." },
+        "releasepilot.qaSmokeScripts": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project-relative .apex smoke checks; each must finish without an exception." },
+        "releasepilot.upgradeSeedScripts": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project-relative .apex files that create baseline test data after the previous released version is installed (upgrade tests)." },
+        "releasepilot.upgradeRegressionScripts": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project-relative .apex regression checks run after the upgrade." },
+        "releasepilot.openOrgAfterInstall": { "type": "boolean", "default": true, "description": "Open the QA org in the browser when preparation finishes." },
+        "releasepilot.qaChecklist": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Manual QA checklist items for fresh-install QA. Empty uses the built-in checklist." },
+        "releasepilot.upgradeChecklist": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Manual QA checklist items for upgrade QA. Empty uses the built-in checklist." },
+        "releasepilot.qaAliasPrefix": { "type": "string", "default": "rp", "pattern": "^[a-z][a-z0-9-]{0,15}$", "description": "Prefix for aliases of scratch orgs created by ReleasePilot." },
         "releasepilot.stepTimeoutMinutes": {
           "type": "number", "default": 60, "minimum": 1, "maximum": 720,
           "description": "Local wait timeout for a workflow step. A timeout does not cancel remote Salesforce jobs."

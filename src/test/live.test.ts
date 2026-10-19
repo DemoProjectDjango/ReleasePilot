@@ -8,6 +8,8 @@ import { GitAdapter } from '../adapters/git';
 import { NodeProcessRunner } from '../adapters/processRunner';
 import { SfCli, resolveSfLauncher } from '../adapters/sfCli';
 import { runCodeAnalyzer } from '../analysis/analyzer';
+import { installedPackages, listScratchOrgs } from '../qa/ops';
+import { parseOrgList } from '../discovery/parsers';
 import { fetchRequest, fetchVersionReport, listAllVersions, listRecentRequests } from '../packaging/build';
 import { DiscoveryService } from '../discovery/discoveryService';
 import { evaluatePreflight } from '../executors/executors';
@@ -183,6 +185,44 @@ describe.skipIf(!live)('LIVE read-only packaging queries', () => {
     expect(req.status).toBe(some!.Status);
     // The command history must contain no create command: this test is read-only.
     expect(history.list().some(h => /package version create(?! (list|report))/.test(h.display))).toBe(false);
+    cleanup(dir);
+  }, 580_000);
+});
+
+/**
+ * LIVE read-only QA parsing: existing scratch orgs and installed packages. Nothing is created, installed,
+ * assigned, opened or deleted.
+ */
+describe.skipIf(!live)('LIVE read-only QA queries', () => {
+  it('parses real scratch org lists and installed package lists without tokens', async () => {
+    const runner = new NodeProcessRunner();
+    const history = new CommandHistory();
+    const sf = new SfCli(runner, history, resolveSfLauncher());
+    const dir = fixture({ packageDirectories: [{ path: 'force-app', default: true }] });
+    const scratch = await listScratchOrgs(sf, { root: dir });
+    console.log(`LIVE qa: scratchOrgs=${scratch.length} withAlias=${scratch.filter(s => s.alias).length} withDevHub=${scratch.filter(s => s.devHubOrgId).length}`);
+    expect(scratch.length).toBeGreaterThan(0);
+    expect(scratch.every(s => /^00D/.test(s.orgId) && s.username.includes('@'))).toBe(true);
+    expect(JSON.stringify(scratch)).not.toMatch(/accessToken/i);
+    const { result } = await sf.json(['org', 'list', '--skip-connection-status'], { cwd: dir });
+    const candidates = parseOrgList(result).filter(o => !o.isDevHub && !o.expired).slice(0, 5);
+    let parsed = false;
+    for (const o of candidates) {
+      try {
+        const pk = await installedPackages(sf, o.alias ?? o.username, { root: dir });
+        if (pk.length) {
+          console.log(`LIVE installed: ${pk.length} package(s), versionIds=${pk.every(p => /^04t/.test(p.versionId ?? ''))}, numbers=${pk.every(p => !!p.versionNumber)}`);
+          expect(pk.every(p => /^04t/.test(p.versionId ?? ''))).toBe(true);
+          parsed = true;
+          break;
+        }
+      } catch {
+        // an org with an expired session is skipped
+      }
+    }
+    expect(parsed).toBe(true);
+    const verbs = history.list().map(h => h.display);
+    expect(verbs.some(v => /org create|package install(?!ed| report)|org delete|assign|org open/.test(v))).toBe(false);
     cleanup(dir);
   }, 580_000);
 });

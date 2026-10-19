@@ -5,7 +5,7 @@
 
   const ICON = { pending: '○', running: '↻', passed: '✓', failed: '✕', blocked: '⛔', 'needs-review': '👁', stale: '⟳', skipped: '⤼', cancelled: '⊘' };
   const LABEL = { pending: 'Pending', running: 'Running', passed: 'Passed', failed: 'Failed', blocked: 'Blocked', 'needs-review': 'Needs Review', stale: 'Stale', skipped: 'Skipped', cancelled: 'Cancelled' };
-  const TABS = [['pipeline', 'Pipeline'], ['project', 'Project'], ['quality', 'Quality'], ['package', 'Package'], ['logs', 'Logs'], ['errors', 'Errors'], ['reports', 'Reports & Artifacts'], ['history', 'Release History'], ['settings', 'Settings']];
+  const TABS = [['pipeline', 'Pipeline'], ['project', 'Project'], ['quality', 'Quality'], ['package', 'Package'], ['qa', 'QA'], ['logs', 'Logs'], ['errors', 'Errors'], ['reports', 'Reports & Artifacts'], ['history', 'Release History'], ['settings', 'Settings']];
 
   const saved = vscode.getState() || {};
   let tab = saved.tab || 'pipeline';
@@ -225,6 +225,74 @@
     return el('div', {}, parts);
   }
 
+  const PHASE_LABEL = { definition: 'Scratch definition', create: 'Create scratch org', dependencies: 'Install dependencies', baseline: 'Install previous released version', seed: 'Seed baseline data',
+    install: 'Install candidate', verify: 'Verify installed version', permsets: 'Assign permission sets', scripts: 'Project scripts', smoke: 'Automated checks', open: 'Open org' };
+  const PHASE_ORDER = ['definition', 'create', 'dependencies', 'baseline', 'seed', 'install', 'verify', 'permsets', 'scripts', 'smoke', 'open'];
+
+  function envCard(e) {
+    const busy = !!data.busy;
+    const live = e.status === 'ready';
+    const stateText = { pass: '\u2713 Pass', fail: '\u2715 Fail', pending: '\u25CB Pending' };
+    const allPass = e.checklist.length > 0 && e.checklist.every(i => i.state === 'pass');
+    const parts = [];
+    parts.push(el('div', {}, el('strong', {}, (e.kind === 'upgrade' ? 'Upgrade test ' : 'Fresh install ') + e.alias), ' ',
+      el('span', { class: 'badge ' + (e.status === 'ready' ? 'passed' : e.status === 'failed' ? 'failed' : 'needs-review') }, e.status),
+      e.signoff ? el('span', { class: 'badge passed' }, 'Signed off by ' + e.signoff.approver) : null));
+    parts.push(table(['Field', 'Value'], [
+      ['Org ID / user', (e.orgId || 'pending') + ' / ' + (e.username || 'pending')], ['Dev Hub', e.devHubAlias + ' (' + e.devHubOrgId + ')'],
+      ['Version under test', (e.targetVersion || '') + ' ' + e.targetVersionId], e.kind === 'upgrade' ? ['Upgraded from (released)', (e.baselineVersion || '') + ' ' + (e.baselineVersionId || '')] : null,
+      ['Installed version verified', e.verifiedInstalledVersion || 'not yet'], ['Install request', e.installRequestId || '-'],
+      ['Created / expires', fmt(e.createdAt) + ' / ' + (e.expiresAt ? fmt(e.expiresAt) : '-')]
+    ].filter(Boolean).map(([k, v]) => el('tr', {}, el('td', {}, k), el('td', {}, v))), ''));
+    if (e.failure) { parts.push(el('div', { class: 'err' }, el('strong', {}, 'Stopped at ' + (e.failedPhase ? PHASE_LABEL[e.failedPhase] : 'a phase') + ': '), e.failure)); }
+    parts.push(table(['Phase', 'Result', 'Detail'], PHASE_ORDER.filter(ph => e.phases[ph] || (e.kind === 'upgrade' || (ph !== 'baseline' && ph !== 'seed'))).map(ph => {
+      const st = e.phases[ph];
+      return el('tr', {}, el('td', {}, PHASE_LABEL[ph]), el('td', {}, st ? (st.status === 'done' ? '\u2713 Done' : '\u2715 Failed') : '\u25CB Pending'), el('td', {}, (st && st.detail) || ''));
+    }), ''));
+    if (e.smoke.length) {
+      parts.push(el('h2', {}, 'Automated checks'));
+      parts.push(table(['Check', 'Result', 'Detail'], e.smoke.map(c => el('tr', {}, el('td', {}, c.name), el('td', {}, CHECK_ICON[c.status]), el('td', {}, c.detail))), ''));
+    }
+    if (e.logRefs.length) {
+      parts.push(el('div', { class: 'toolbar' }, e.logRefs.slice(-4).map(ref => el('button', { class: 'action secondary', onclick: () => post({ type: 'openReport', ref }) }, 'Open log: ' + ref.split(/[\\/]/).pop().slice(0, 40)))));
+    }
+    parts.push(el('div', { class: 'toolbar' },
+      el('button', { class: 'action secondary', disabled: busy || !live, onclick: () => post({ type: 'qaOpen', envId: e.id }) }, 'Open Org'),
+      el('button', { class: 'action secondary', disabled: busy || !e.orgId || e.status === 'deleted', onclick: () => post({ type: 'qaDelete', envId: e.id }) }, 'Delete Scratch Org...')));
+    parts.push(el('h2', {}, 'Manual QA checklist'));
+    parts.push(el('p', { class: 'muted' }, 'Installation success does not mean the product works. Each item must be verified by a person and explicitly marked; nothing passes by inference.'));
+    e.checklist.forEach(i => parts.push(el('div', { class: 'finding' },
+      el('div', {}, el('strong', {}, stateText[i.state]), ' ', i.text),
+      i.note || i.by ? el('div', { class: 'muted' }, (i.by ? i.by + ' ' : '') + (i.at ? fmt(i.at) : '') + (i.note ? ' \u00B7 ' + i.note : '')) : null,
+      el('div', { class: 'toolbar' },
+        el('button', { class: 'action secondary', disabled: busy || !live || !!e.signoff, onclick: () => post({ type: 'qaMark', envId: e.id, itemId: i.id, state: 'pass' }) }, 'Mark Pass'),
+        el('button', { class: 'action secondary', disabled: busy || !live || !!e.signoff, onclick: () => post({ type: 'qaMark', envId: e.id, itemId: i.id, state: 'fail' }) }, 'Mark Fail...')))));
+    parts.push(el('div', { class: 'toolbar' }, el('button', { class: 'action', disabled: busy || !live || !allPass || !!e.signoff, title: allPass ? '' : 'Mark every item Pass first', onclick: () => post({ type: 'qaSignOff', envId: e.id }) }, e.signoff ? 'Signed off ' + fmt(e.signoff.at) : 'Sign Off QA...')));
+    return el('details', { class: 'step', open: true }, el('summary', {}, el('strong', {}, (e.kind === 'upgrade' ? 'Upgrade: ' : 'Fresh install: ') + e.alias), el('span', { class: 'badge' }, e.status)), el('div', { class: 'body' }, parts));
+  }
+
+  function qaTab() {
+    const q = data.qa || { envs: [], definition: [] };
+    const steps = data.state.run.steps;
+    const busy = !!data.busy;
+    const def = id => data.definitions.find(d => d.id === id);
+    const why = id => blockedReason(def(id), steps);
+    const parts = [el('h2', {}, 'QA environments')];
+    parts.push(el('p', { class: 'muted' }, 'Creates a clean scratch org from your Dev Hub (no namespace, so the managed package can install), installs the exact candidate 04t, assigns permission sets, runs your project scripts, and opens the org. Automation ending successfully only makes the step "Needs Review": you must then complete the manual checklist and sign off.'));
+    parts.push(el('div', { class: 'toolbar' },
+      el('button', { class: 'action', disabled: busy || !!why('clean-install-qa'), title: why('clean-install-qa') || '', onclick: () => post({ type: 'run', stepId: 'clean-install-qa' }) }, steps['clean-install-qa'].status === 'needs-review' ? 'Continue QA Environment' : 'Prepare QA Environment'),
+      el('button', { class: 'action secondary', disabled: busy || !!why('upgrade-qa'), title: why('upgrade-qa') || '', onclick: () => post({ type: 'run', stepId: 'upgrade-qa' }) }, 'Run Upgrade Test')));
+    if (why('clean-install-qa')) { parts.push(el('p', { class: 'muted' }, 'Prepare QA Environment is unavailable: ' + why('clean-install-qa'))); }
+    parts.push(el('p', { class: 'muted' }, 'Upgrade testing installs the previous released version, then upgrades to the candidate. Salesforce allows upgrading to a beta from a released version in a scratch org, but never from a beta, so unsupported paths are blocked with an explanation.'));
+    const us = steps['upgrade-qa'];
+    if (us.message && (us.status === 'blocked' || us.status === 'skipped')) { parts.push(el('div', { class: 'banner' }, 'Upgrade QA: ' + us.message + (us.failure && us.failure.remediation ? ' Alternative: ' + us.failure.remediation : ''))); }
+    parts.push(el('h2', {}, 'Scratch org definition: ' + (q.definitionFile || '')));
+    parts.push(table(['Check', 'Result', 'Detail'], (q.definition || []).map(c => el('tr', {}, el('td', {}, c.name), el('td', {}, CHECK_ICON[c.status]), el('td', {}, c.detail))), 'No project selected.'));
+    if (!q.envs.length) { parts.push(el('div', { class: 'empty' }, 'No QA environments yet.')); }
+    q.envs.forEach(e => parts.push(envCard(e)));
+    return el('div', {}, parts);
+  }
+
   let qGroup = 'file';
   let qFilter = '';
   let qShowTriaged = false;
@@ -388,6 +456,8 @@
       sel.addEventListener('change', () => post({ type: 'setSetting', key, value: sel.value }));
       return el('tr', {}, el('td', {}, el('label', { for: 'set-' + key }, label)), el('td', {}, sel), el('td', { class: 'muted' }, hint));
     };
+    const openBox = el('input', { type: 'checkbox', id: 'set-openOrgAfterInstall', checked: s.openOrgAfterInstall });
+    openBox.addEventListener('change', () => post({ type: 'setSetting', key: 'openOrgAfterInstall', value: openBox.checked }));
     const deploy = el('input', { type: 'checkbox', id: 'set-deployBeforeTests', checked: s.deployBeforeTests });
     deploy.addEventListener('change', () => post({ type: 'setSetting', key: 'deployBeforeTests', value: deploy.checked }));
     const dirty = el('input', { type: 'checkbox', id: 'set-allowDirtySource', checked: s.allowDirtySource });
@@ -396,6 +466,10 @@
       el('tr', {}, el('td', {}, el('label', { for: 'set-allowDirtySource' }, 'Allow uncommitted source')), el('td', {}, dirty),
         el('td', { class: 'muted' }, 'Lets Source Ready pass with uncommitted changes. Not recommended for release candidates.')),
       choice('severityGate', 'Analyzer severity gate', ['none', 'critical', 'high', 'moderate', 'low'], 'Untriaged findings at or above this severity block the pipeline.'),
+      field('qaOrgDurationDays', 'QA org lifetime (days)', 1, 30, 'Scratch org expiry; the org is never deleted automatically.'),
+      field('qaWaitMinutes', 'QA create/install wait (minutes)', 1, 120, 'Local limit; a timeout never cancels remote work.'),
+      choice('qaSecurityType', 'Install security type', ['AdminsOnly', 'AllUsers'], 'Who gets access to the package in the QA org.'),
+      el('tr', {}, el('td', {}, el('label', { for: 'set-openOrgAfterInstall' }, 'Open org after preparing')), el('td', {}, openBox), el('td', { class: 'muted' }, 'Permission sets, scripts and checklists: edit the releasepilot.qa* settings in VS Code.')),
       choice('installationKeyPolicy', 'Installation key policy', ['require', 'allow-bypass'], 'require: every build needs a key (asked each time, never stored). allow-bypass: empty key after explicit confirmation.'),
       field('buildWaitMinutes', 'Package build wait (minutes)', 1, 720, 'Local tracking limit. A timeout never cancels the build; retry continues the same request.'),
       field('buildPollSeconds', 'Build status poll (seconds)', 5, 120, 'Interval between status checks.'),
@@ -435,7 +509,7 @@
     if (!data) { app.replaceChildren(el('p', {}, 'Loading…')); return; }
     const tabs = el('nav', { role: 'tablist' }, TABS.map(([id, label]) =>
       el('button', { role: 'tab', 'aria-selected': String(tab === id), onclick: () => { tab = id; persistUi(); render(); } }, label)));
-    const view = { pipeline: pipelineTab, project: projectTab, quality: qualityTab, package: packageTab, logs: logsTab, errors: errorsTab, reports: reportsTab, history: historyTab, settings: settingsTab }[tab]();
+    const view = { pipeline: pipelineTab, project: projectTab, quality: qualityTab, package: packageTab, qa: qaTab, logs: logsTab, errors: errorsTab, reports: reportsTab, history: historyTab, settings: settingsTab }[tab]();
     app.replaceChildren(
       el('h1', {}, 'ReleasePilot'),
       el('div', { class: 'muted' }, 'Salesforce managed 2GP release automation · TwinStack Solutions'),

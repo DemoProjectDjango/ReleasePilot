@@ -1,19 +1,22 @@
 import { PIPELINE } from '../core/pipeline';
 import { StepId } from '../core/models';
 
-export const BOOLEAN_SETTINGS = ['allowDirtySource', 'deployBeforeTests'] as const;
+export const BOOLEAN_SETTINGS = ['allowDirtySource', 'deployBeforeTests', 'openOrgAfterInstall'] as const;
 export const ENUM_SETTINGS: Record<string, readonly string[]> = {
   severityGate: ['none', 'critical', 'high', 'moderate', 'low'],
   testLevel: ['RunLocalTests', 'RunAllTestsInOrg'],
-  installationKeyPolicy: ['require', 'allow-bypass']
+  installationKeyPolicy: ['require', 'allow-bypass'],
+  qaSecurityType: ['AdminsOnly', 'AllUsers']
 };
-export type SettingKey = 'coverageTargetPercent' | 'logRetentionEntries' | 'stepTimeoutMinutes' | 'testWaitMinutes' | 'severityGate' | 'testLevel' | 'installationKeyPolicy' | 'buildWaitMinutes' | 'buildPollSeconds' | typeof BOOLEAN_SETTINGS[number];
+export type SettingKey = 'coverageTargetPercent' | 'logRetentionEntries' | 'stepTimeoutMinutes' | 'testWaitMinutes' | 'severityGate' | 'testLevel' | 'installationKeyPolicy' | 'qaSecurityType' | 'qaOrgDurationDays' | 'qaWaitMinutes' | 'buildWaitMinutes' | 'buildPollSeconds' | typeof BOOLEAN_SETTINGS[number];
 
 export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'run' | 'retry' | 'cancel'; stepId: StepId }
   | { type: 'resume' | 'newRun' | 'showLogs' | 'refresh' | 'discover' | 'retrievePreview' | 'retrieveApply' | 'rerunFailed' | 'exportSummary' | 'refreshBuild' }
   | { type: 'openFile'; key: string }
+  | { type: 'qaMark'; envId: string; itemId: string; state: 'pass' | 'fail' }
+  | { type: 'qaSignOff' | 'qaDelete' | 'qaOpen'; envId: string }
   | { type: 'openReport' | 'exportReport'; ref: string }
   | { type: 'triage' | 'untriage' | 'applyFix'; key: string }
   | { type: 'selectFolder'; path: string }
@@ -25,9 +28,12 @@ export const SETTINGS: Record<string, { min: number; max: number }> = {
   logRetentionEntries: { min: 100, max: 50000 },
   stepTimeoutMinutes: { min: 1, max: 720 },
   testWaitMinutes: { min: 1, max: 600 },
+  qaOrgDurationDays: { min: 1, max: 30 },
+  qaWaitMinutes: { min: 1, max: 120 },
   buildWaitMinutes: { min: 1, max: 720 },
   buildPollSeconds: { min: 5, max: 120 }
 };
+const ID_RE = /^[A-Za-z0-9-]{1,64}$/;
 const REF_RE = /^[^\u0000\r\n]{1,2000}$/;
 const ALIAS_RE = /^[A-Za-z0-9_.@+-]{1,128}$/;
 const CONTROL_RE = /[\u0000\r\n]/;
@@ -53,6 +59,13 @@ export function parseMessage(raw: unknown): WebviewMessage | undefined {
     case 'exportSummary':
     case 'refreshBuild':
       return { type: m.type };
+    case 'qaMark':
+      return typeof m.envId === 'string' && ID_RE.test(m.envId) && typeof m.itemId === 'string' && /^c\d{1,3}$/.test(m.itemId) && (m.state === 'pass' || m.state === 'fail')
+        ? { type: 'qaMark', envId: m.envId, itemId: m.itemId, state: m.state } : undefined;
+    case 'qaSignOff':
+    case 'qaDelete':
+    case 'qaOpen':
+      return typeof m.envId === 'string' && ID_RE.test(m.envId) ? { type: m.type, envId: m.envId } : undefined;
     case 'openFile':
     case 'triage':
     case 'untriage':

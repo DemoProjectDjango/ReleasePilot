@@ -1,5 +1,57 @@
 # ReleasePilot — Implementation Status
 
+## Slice 5 — Scratch Org Automation, Installation, and QA
+
+**State:** Implemented. Read-only queries are verified against your real orgs. **No scratch org was created, no package was installed, and nothing was assigned, opened or deleted during development**: the creation, installation, permission, script, open and delete paths are tested with a stateful mocked CLI only, so the first real run should be watched.
+
+### Completed features
+- **Prepare QA Environment** (`clean-install-qa`), one resumable orchestration with a recorded result per phase: validate the scratch definition, create the org, install dependencies, install the exact candidate 04t, verify it is really installed, assign permission sets, run project scripts, run automated checks, open the org.
+- **Definition validation before anything is created:** file inside the project, valid JSON, edition (or snapshot/source org), well-formed features and settings, with warnings for duplicate/absent features and an ignored namespace. Script paths (must be existing project `.apex` files) and permission-set names are validated up front too.
+- **Namespace-safe, non-default orgs:** always `--no-namespace` (an org carrying the package's namespace cannot install that managed package), `--no-track-source`, never `--set-default`, collision-proof alias (prefix, package, minute stamp, random suffix).
+- **Confirmation before creating:** names the Dev Hub (alias and org ID), the allocation use, alias, lifetime, definition, what will be installed, permission sets and every project script that will run in the new org. Declining performs nothing.
+- **Candidate binding:** only a promotable build (coverage check passed) of exactly the current source can be installed; otherwise `NO_CURRENT_CANDIDATE`.
+- **Installs:** non-interactive (`--no-prompt`), configurable security type, installation key asked only if the build used one and never stored; progress tracked by install request ID and polled; a wait timeout is Needs Review and a retry continues the same install. Dependencies are resolved to 04t IDs (explicit, alias, or newest matching version) and installed first, skipping any already present.
+- **Verification, not assumption:** `sf package installed list` must show the candidate 04t; permission-set assignment is queried back; smoke scripts must finish without exception.
+- **Install logs are always kept:** success or failure, a redacted install log is written as evidence. A failed org is retained for inspection; a retry builds a **new** clean org (never a repair in place) and never deletes anything.
+- **Reconciliation:** the environment is stored before the create call. After an interruption the org is looked up by alias and adopted rather than created twice; if it does not exist the record is closed as failed and a new one is made.
+- **Never auto-Passed:** when automation finishes the step is **Needs Review**. A person marks each checklist item Pass or Fail (a failure needs a description and fails the step immediately), then signs off. Sign-off is refused unless every automated phase is done, no automated check failed, the installed version is verified, every item is Pass, and the source is unchanged. The signed report (approver, time, checklist, environment, version) becomes the evidence that lets the step pass (`engine.applyManualResult`).
+- **Upgrade QA** (`upgrade-qa`): new products are skipped as not applicable. Otherwise the previous released version is the candidate's direct ancestor; ReleasePilot installs it in a fresh org (asking for its key if protected), runs seed scripts, upgrades to the candidate, runs regression scripts, then requires the upgrade-specific manual checklist and sign-off. Unsupported paths are **blocked with the reason and an alternative**: no ancestor, unresolved ancestor, ancestor is a beta (Salesforce does not allow upgrading from a beta), candidate already released. A beta can never be used as a baseline (hard guard).
+- **Cleanup:** Delete Scratch Org is explicit, only for orgs ReleasePilot created (alias and org ID must match a live scratch org of the same Dev Hub), behind a modal naming org, user and Dev Hub; reports and logs are retained.
+- **QA tab:** definition checks, environment cards (identity, versions, phases, automated checks, logs), Open Org, Delete, checklist with Pass/Fail and notes, Sign Off, and settings for lifetime, wait, security type and open-after-install.
+
+### Official-rule check (Salesforce 2GP upgrade documentation)
+Upgrading a subscriber to a beta from a released version is supported (scratch orgs and sandboxes only); upgrading from a beta is not; betas cannot be ancestors; the new version must descend from the installed one. These rules drive `evaluateUpgradePath`.
+
+### Requirement IDs
+FR-17, FR-18, FR-19, FR-20, FR-23, FR-32 (automated upgrade QA, pulled forward from P1), FR-22, FR-27 (environment and install reconciliation), NFR-03, NFR-04, NFR-05, NFR-06, NFR-09, NFR-16, NFR-20.
+
+### Files created or modified
+New: `src/qa/{parsers,scratchDef,store,ops,upgradePath,signoff}.ts`, `src/executors/qa.ts`, `src/test/slice5.test.ts`. Modified: `src/engine/workflowEngine.ts` (`applyManualResult`), `src/core/redact.ts` (session URLs), `src/packaging/parsers.ts` (ancestor, version id and key flag), `src/extension.ts`, `src/ui/{messages,dashboardPanel}.ts`, `media/dashboard.js`, `package.json` (QA settings), `src/test/live.test.ts`.
+
+### Tests executed
+| Category | What | Result |
+|---|---|---|
+| Mocked (stateful CLI simulator) | every executor outcome: success ending Needs Review, declined, stale candidate, invalid definition/scripts/permsets, key prompt and cancel, install failure with preserved log and a NEW org on retry, verification failure, failing smoke checks, install timeout then resume, interrupted-create adoption, allocation error, dependencies, upgrade ordering (baseline, seed, upgrade, regression), protected baseline key, unsupported/new-product upgrade paths | pass |
+| Mocked / unit | scratch definition rules, command construction (flags that must and must not appear), key redaction, upgrade-path matrix, sign-off blockers, manual-result rules, message validation | pass |
+| **Live read-only** | real `org list` scratch entries and `package installed list` parsed from your orgs; asserted that no create, install, assign, open or delete command was issued | pass |
+| Default suite | `npm run check` | 152 passed, 6 live/local-tool tests skipped by default |
+| **Not run** | creating a scratch org, installing, assigning permission sets, running scripts, opening and deleting an org in any real environment; VS Code UI check | see limitations |
+
+### Defects found by testing and fixed
+1. Aliases were stamped to the minute, so two orgs created in the same minute would have shared an alias (the second would overwrite the first). A random suffix was added.
+2. Install errors shaped `{message: ...}` were shown as raw JSON instead of the message.
+
+### Known limitations
+- `sf org create scratch`, `sf package install` (including the `--wait` timeout payload and the install-report JSON), `org assign permset`, `apex run` and `org delete scratch` result shapes are taken from CLI help and documentation and are not verified against live runs.
+- Dependencies given as ranges (`LATEST`) resolve to the newest matching version in the Dev Hub (released preferred); installation keys for dependencies are not supported.
+- Project scripts run arbitrary Apex in the new scratch org; they are only ever executed there, are listed in the confirmation, and require a trusted workspace.
+- Scratch org allocation is not pre-checked; exhaustion is reported with guidance when Salesforce refuses.
+- A manual sign-off is by the local user name plus the typed approver name; there is no identity verification beyond that.
+- Concurrent upgrade and fresh-install environments are independent; there is no cap on how many orgs are created over time, and cleanup is manual.
+- The QA tab and the sign-off dialogs have not been exercised in a live VS Code window.
+
+### Recommended next: Slice 6 — release readiness and controlled promotion (after approval).
+
 ## Slice 4 — Managed 2GP Package Creation
 
 **State:** Implemented. Everything except the actual `sf package version create` call is verified against the real Dev Hub (read-only). **No package version was created during development**: the create path, polling and verification are tested with a mocked CLI only, and the first real build should be watched.

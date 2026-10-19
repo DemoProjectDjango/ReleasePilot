@@ -98,6 +98,10 @@ export function parseVersionReport(raw: unknown): VersionReport | undefined {
 
 export interface ExistingVersion {
   subscriberPackageVersionId?: string;
+  /** The 05i package version id (what AncestorId refers to). */
+  packageVersionId?: string;
+  ancestorId?: string;
+  passwordProtected?: boolean;
   version: string;
   isReleased: boolean;
   branch?: string;
@@ -107,6 +111,6 @@ export function parseVersionList(raw: unknown): ExistingVersion[] {
   return (Array.isArray(raw) ? raw : []).flatMap(x => {
     const r = o(x);
     const version = s(r.Version);
-    return version ? [{ version, subscriberPackageVersionId: s(r.SubscriberPackageVersionId), isReleased: r.IsReleased === true, branch: s(r.Branch) }] : [];
+    return version ? [{ version, subscriberPackageVersionId: s(r.SubscriberPackageVersionId), packageVersionId: s(r.Id), ancestorId: s(r.AncestorId), passwordProtected: typeof r.IsPasswordProtected === 'boolean' ? r.IsPasswordProtected : undefined, isReleased: r.IsReleased === true, branch: s(r.Branch) }] : [];
   });
 }

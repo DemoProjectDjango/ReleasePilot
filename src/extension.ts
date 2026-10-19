@@ -20,6 +20,11 @@ import { PackagingSettings, createPackagingExecutors } from './executors/packagi
 import { ReportWriter } from './executors/reportWriter';
 import { abortableSleep, fetchRequest } from './packaging/build';
 import { PackagingStore } from './packaging/store';
+import { QaSettings, createQaExecutors, summary as qaSummary } from './executors/qa';
+import { deleteScratch, listScratchOrgs, openOrg } from './qa/ops';
+import { validateScratchDefinition } from './qa/scratchDef';
+import { signOffBlockers } from './qa/signoff';
+import { QaStore } from './qa/store';
 import { TestLevel, evaluateApex, runApexTests } from './testing/apex';
 import { QualityStore } from './testing/qualityStore';
 import { buildSummaryMarkdown } from './testing/summary';
@@ -38,6 +43,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const quality = new QualityStore(path.join(storageDir, 'quality-state.json'));
   const triage = new TriageStore(path.join(storageDir, 'triage.json'));
   const packaging = new PackagingStore(path.join(storageDir, 'packaging.json'));
+  const qa = new QaStore(path.join(storageDir, 'qa.json'));
 
   const output = vscode.window.createOutputChannel('ReleasePilot');
   context.subscriptions.push(output);
@@ -102,6 +108,32 @@ export function activate(context: vscode.ExtensionContext): void {
       'Anyone who has the install link for this beta version will be able to install it.')) ? { bypass: true } : undefined;
   };
 
+  const qaSettings = (): QaSettings => ({
+    definitionFile: cfg().get<string>('scratchDefinitionFile', 'config/project-scratch-def.json'),
+    durationDays: cfg().get<number>('qaOrgDurationDays', 7),
+    waitMinutes: cfg().get<number>('qaWaitMinutes', 30),
+    pollSeconds: cfg().get<number>('buildPollSeconds', 15),
+    securityType: cfg().get<'AdminsOnly' | 'AllUsers'>('qaSecurityType', 'AdminsOnly'),
+    permissionSets: cfg().get<string[]>('qaPermissionSets', []),
+    initScripts: cfg().get<string[]>('qaInitScripts', []),
+    smokeScripts: cfg().get<string[]>('qaSmokeScripts', []),
+    seedScripts: cfg().get<string[]>('upgradeSeedScripts', []),
+    regressionScripts: cfg().get<string[]>('upgradeRegressionScripts', []),
+    openOrgAfterInstall: cfg().get<boolean>('openOrgAfterInstall', true),
+    checklist: cfg().get<string[]>('qaChecklist', []),
+    upgradeChecklist: cfg().get<string[]>('upgradeChecklist', []),
+    aliasPrefix: cfg().get<string>('qaAliasPrefix', 'rp')
+  });
+
+  const askQaKey = async (label: string): Promise<{ key?: string } | undefined> => {
+    const key = await vscode.window.showInputBox({
+      title: `Installation key for the ${label}`, prompt: 'Needed to install this package version into the QA org. Passed to the Salesforce CLI, never stored.',
+      password: true, ignoreFocusOut: true,
+      validateInput: v => (v && !/^[^\s\u0000-\u001f]{1,100}$/.test(v) ? 'Use 1-100 characters without spaces.' : (!v ? 'Enter the installation key.' : undefined))
+    });
+    return key ? { key } : undefined;
+  };
+
   const engine: WorkflowEngine = new WorkflowEngine({
     store,
     logger,
@@ -116,6 +148,10 @@ export function activate(context: vscode.ExtensionContext): void {
         allowDirty: () => cfg().get<boolean>('allowDirtySource', false),
         stepStatus: (id: StepId): StepStatus => engine.getState().run.steps[id].status,
         confirm: confirmRemote, askInstallationKey, settings: packagingSettings, sleep: abortableSleep
+      }),
+      ...createQaExecutors({
+        sf, discovery, reports, qa, packaging, getRoot, git: root => git.snapshot(root), settings: qaSettings,
+        confirm: confirmRemote, askKey: askQaKey, sleep: abortableSleep
       })
     },
     canExecute: () => trusted() ? { allowed: true } : { allowed: false, reason: 'Running workflow steps requires a trusted workspace.' },
@@ -191,11 +227,19 @@ export function activate(context: vscode.ExtensionContext): void {
       package: snap.selectedPackage, versionNumber: snap.project?.packageDirectories.find(p => p.packageId && p.packageId === pkgId)?.versionNumber };
   };
 
+  const qaView = () => {
+    const root = getRoot();
+    const hubId = discovery.snapshot.devHub?.orgId;
+    const envs = qa.list().filter(e => !hubId || e.devHubOrgId === hubId).slice(0, 8).map(e => ({ ...qaSummary(e), checklist: e.checklist, signoff: e.signoff, logRefs: e.logRefs, installRequestId: e.installRequestId }));
+    return { envs, definition: root ? validateScratchDefinition(root, qaSettings().definitionFile).checks : [], definitionFile: qaSettings().definitionFile };
+  };
+
   const view = () => ({
     discovery: discovery.snapshot,
     retrieval: retrieval.lastPreview,
     quality: qualityView(),
     packaging: packagingView(),
+    qa: qaView(),
     busy,
     notice,
     selectedRoot: getRoot(),
@@ -384,6 +428,100 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   };
 
+  const stepOfKind = (k: 'fresh-install' | 'upgrade'): StepId => (k === 'upgrade' ? 'upgrade-qa' : 'clean-install-qa');
+
+  const qaMark = async (envId: string, itemId: string, state: 'pass' | 'fail') => {
+    const env = qa.get(envId);
+    const item = env?.checklist.find(i => i.id === itemId);
+    if (!env || !item || env.status !== 'ready' || env.signoff) {
+      notice = { level: 'error', text: 'That QA environment is not open for checklist updates.' };
+      return;
+    }
+    const note = await vscode.window.showInputBox({
+      title: `${state === 'pass' ? 'Pass' : 'Fail'}: ${item.text}`,
+      prompt: state === 'fail' ? 'Describe what failed (required). This is recorded with your name.' : 'Optional note or evidence reference (a ticket, screenshot path...).',
+      validateInput: v => (state === 'fail' && v.trim().length < 5 ? 'Please describe the failure.' : undefined)
+    });
+    if (note === undefined) {
+      return;
+    }
+    item.state = state;
+    item.note = note.trim() || undefined;
+    item.by = os.userInfo().username;
+    item.at = new Date().toISOString();
+    qa.save(env);
+    logger.log(state === 'fail' ? 'warn' : 'info', 'qa', `Checklist "${item.text}" marked ${state} by ${item.by}`);
+    if (state === 'fail') {
+      const r = engine.applyManualResult(stepOfKind(env.kind), {
+        status: 'failed', message: `Manual QA failed: ${item.text}`,
+        failure: { code: 'QA_FAILED', message: item.note ?? 'A manual QA item failed.', remediation: 'Fix the defect, rebuild a candidate and run QA again in a new clean org.' }
+      });
+      if (!r.ok) {
+        notice = { level: 'error', text: r.message };
+      }
+    }
+  };
+
+  const qaSignOff = async (envId: string) => {
+    const env = qa.get(envId);
+    const root = getRoot();
+    if (!env || !root || !trusted() || env.status !== 'ready' || env.signoff) {
+      notice = { level: 'error', text: 'That environment cannot be signed off.' };
+      return;
+    }
+    const stepId = stepOfKind(env.kind);
+    const blockers = signOffBlockers(env, (await git.snapshot(root)).fingerprint);
+    if (blockers.length) {
+      notice = { level: 'error', text: `Cannot sign off: ${blockers.join(' ')}` };
+      return;
+    }
+    const approver = await vscode.window.showInputBox({ title: 'QA sign-off: approver name', value: os.userInfo().username, prompt: 'Recorded in the release audit trail.', validateInput: v => (v.trim().length < 2 ? 'Enter a name.' : undefined) });
+    if (!approver) {
+      return;
+    }
+    const ok = await confirmRemote(`Sign off ${env.kind === 'upgrade' ? 'upgrade' : 'fresh-install'} QA of ${env.targetVersion ?? env.targetVersionId}?`,
+      `Org: ${env.alias} (${env.orgId})\nVersion: ${env.targetVersionId}\nApprover: ${approver.trim()}\nAll ${env.checklist.length} checklist items are marked Pass.\n\nThis records that you personally verified the functionality. It can be revoked only by rebuilding and re-testing.`);
+    if (!ok) {
+      return;
+    }
+    const signoff = { approver: approver.trim(), at: new Date().toISOString() };
+    const evidence = reports.write('qa-signoff', `Signed QA result (${env.kind}) for ${env.targetVersionId}`, { environment: qaSummary(env), checklist: env.checklist, signoff });
+    const res = engine.applyManualResult(stepId, { status: 'passed', evidence: [evidence], message: `Manual QA signed off by ${signoff.approver} for ${env.targetVersionId} in ${env.alias}.` });
+    if (res.ok) {
+      qa.save({ ...env, signoff });
+      logger.log('info', 'qa', `QA signed off by ${signoff.approver} for ${env.targetVersionId}`);
+    } else {
+      notice = { level: 'error', text: res.message };
+    }
+  };
+
+  const qaDelete = async (envId: string) => {
+    const env = qa.get(envId);
+    const root = getRoot();
+    if (!env || !root || !trusted() || !env.orgId || env.status === 'deleted') {
+      notice = { level: 'error', text: 'There is no live scratch org recorded for that environment.' };
+      return;
+    }
+    await withBusy('Deleting scratch org', async () => {
+      // Only an org this extension created, in this Dev Hub, that still exists with the same ID.
+      const live = (await listScratchOrgs(sf, { root })).find(o => o.alias === env.alias && o.orgId === env.orgId);
+      if (!live || (live.devHubOrgId && live.devHubOrgId !== env.devHubOrgId)) {
+        notice = { level: 'info', text: 'That scratch org no longer exists (or is not the one ReleasePilot created). Nothing was deleted.' };
+        qa.save({ ...env, status: 'deleted' });
+        return;
+      }
+      const ok = await vscode.window.showWarningMessage(`Permanently delete scratch org ${env.alias}?`,
+        { modal: true, detail: `Org: ${env.alias} (${env.orgId}), user ${env.username}\nDev Hub: ${env.devHubAlias} (${env.devHubOrgId})\n\nThe org and everything in it will be lost. Reports and the install log are kept.` }, 'Delete Org');
+      if (ok !== 'Delete Org') {
+        return;
+      }
+      await deleteScratch(sf, env.alias, { root });
+      qa.save({ ...env, status: 'deleted' });
+      logger.log('warn', 'qa', `Deleted scratch org ${env.alias} (${env.orgId}) at the user's request.`);
+      notice = { level: 'info', text: `Deleted ${env.alias}.` };
+    });
+  };
+
   const handleAction = async (msg: WebviewMessage): Promise<void> => {
     const say = (res: { ok: boolean; message?: string }) => {
       if (!res.ok && res.message) {
@@ -546,6 +684,23 @@ export function activate(context: vscode.ExtensionContext): void {
           packaging.upsert({ ...live, status: r.status, errors: r.errors, subscriberPackageVersionId: r.subscriberPackageVersionId ?? live.subscriberPackageVersionId, lastPolledAt: new Date().toISOString() });
           notice = { level: 'info', text: `Request ${live.requestId} is ${r.status}. Run the Create Beta Package step again to finish verification.` };
         });
+        break;
+      }
+      case 'qaMark':
+        await qaMark(msg.envId, msg.itemId, msg.state);
+        break;
+      case 'qaSignOff':
+        await qaSignOff(msg.envId);
+        break;
+      case 'qaDelete':
+        await qaDelete(msg.envId);
+        break;
+      case 'qaOpen': {
+        const env = qa.get(msg.envId);
+        const root = getRoot();
+        if (env && root && trusted() && env.status === 'ready') {
+          await withBusy('Opening QA org', () => openOrg(sf, env.alias, { root }));
+        }
         break;
       }
       case 'setSetting': {

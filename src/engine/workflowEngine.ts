@@ -226,6 +226,34 @@ export class WorkflowEngine {
     this.persist();
   }
 
+  /**
+   * Records the outcome of a human-performed check (manual QA). Only a step that automation has already
+   * completed (needs-review) can be resolved, and a pass must carry evidence such as a signed report.
+   */
+  applyManualResult(id: StepId, result: Pick<StepResult, 'status' | 'message' | 'evidence' | 'failure' | 'fingerprint'>): RunRefusal | { ok: true } {
+    const step = this.state.run.steps[id];
+    const def = this.defs.get(id);
+    if (!step || !def) {
+      return { ok: false, code: 'UNKNOWN_STEP', message: `Unknown step "${id}".` };
+    }
+    if (step.status !== 'needs-review') {
+      return { ok: false, code: 'NOT_AWAITING_REVIEW', message: `${def.title} is not waiting for a manual result (currently ${step.status}).` };
+    }
+    if (result.status !== 'passed' && result.status !== 'failed') {
+      return { ok: false, code: 'INVALID_RESULT', message: 'A manual result must be passed or failed.' };
+    }
+    if (result.status === 'passed' && !(result.evidence?.length)) {
+      return { ok: false, code: 'EVIDENCE_MISSING', message: 'A manual pass requires signed evidence.' };
+    }
+    this.finish(step, result.status, result.message ? redact(result.message) : undefined);
+    step.evidence = [...step.evidence, ...(result.evidence ?? [])];
+    step.fingerprint = result.fingerprint ?? step.fingerprint;
+    step.failure = result.failure ? this.failure(result.failure.code, redact(result.failure.message), result.failure.detail ? redact(result.failure.detail) : undefined, result.failure.remediation) : undefined;
+    this.opts.logger.log(result.status === 'passed' ? 'info' : 'warn', 'engine', `${def.title} manually resolved: ${result.status}`, id);
+    this.persist();
+    return { ok: true };
+  }
+
   addArtifact(evidence: Evidence): void {
     this.state.artifacts = [evidence, ...(this.state.artifacts ?? [])].slice(0, 200);
     this.persist();
