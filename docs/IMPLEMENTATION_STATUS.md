@@ -1,0 +1,296 @@
+# ReleasePilot — Implementation Status
+
+## Overall status (all six slices built)
+
+| Slice | State | Verification level |
+|---|---|---|
+| 1 Foundation and UI | built | automated; UI not exercised in a live window |
+| 2 Discovery and CLI adapter | built | automated; live read-only org/package queries |
+| 3 Analysis, tests, reports | built | automated; **real Code Analyzer run**; Apex/deploy mocked |
+| 4 Package creation | built | automated; live read-only package queries; create mocked |
+| 5 Scratch org QA | built | automated; live read-only org/package queries; create/install mocked |
+| 6 Readiness and promotion | built | automated; live read-only gate inputs; promote mocked |
+
+**Not yet verified anywhere (needs a supervised pilot):** every command that changes a Salesforce environment: `apex run test`, `project deploy start`, `package version create`, `org create scratch`, `package install`, `org assign permset`, `apex run`, `org delete scratch`, `package version promote`. The extension has also never been launched in a VS Code window. Until those are done, the product should be treated as feature-complete but not field-proven.
+
+
+## Slice 6 — Release Readiness and Controlled Promotion
+
+**State:** Implemented. All Salesforce-derived gates are verified against your real Dev Hub, read-only. **No version was promoted during development, and the promote command was never run against any org**: promotion is tested with a mocked CLI only. All six slices are now built; see "Overall status" below for what remains unverified.
+
+### Completed features
+- **Release Readiness step** re-reads Salesforce and the saved evidence and evaluates 15 gates for the exact candidate 04t, producing a consolidated report (JSON, Markdown and HTML, all saved as evidence and exportable):
+  - *Required, never overridable:* candidate identity; live package-version state (belongs to the package, not already released); package-version coverage at least 75% with Salesforce's own coverage check passed; full validation (not skipped); package built from exactly the current source; Dev Hub/package identity from Preflight; static analysis (current, no untriaged blockers, no scanner warnings); Apex tests (current, passing, local source deployed); signed clean-install QA for this exact version and source; signed upgrade QA when an upgrade path exists (an unsupported path is a blocker with the reason); a released major.minor.patch cannot be reused.
+  - *Local policy, overridable with a written justification:* internal org-wide coverage target, LWC Jest, uncommitted source. An override records reason (min. 15 characters), owner and time, applies only to that version and source, and appears in the report.
+  - *Advisory:* installation key bypass.
+- **Evidence hash** binds the 04t, Dev Hub, package, source fingerprint, every gate result and the content hash of every evidence file. Anything that changes it invalidates the review.
+- **Approve & Promote:** the sequence is (1) a passed, current review; (2) a modal listing package, Dev Hub (alias and org ID), version, 04t, validation and coverage summary, remaining warnings and the permanent impact; (3) typing the exact 04t; (4) a single-use approval token (10-minute lifetime) bound to that 04t and evidence hash; (5) the engine's own approval gate. No path promotes automatically after a build.
+- **Promotion executor:** queries Salesforce first and never promotes an already-released version (verification-only, recorded as such); re-gathers the evidence and refuses if it drifted from the review; writes an "attempting" record **before** the irreversible call; builds exactly `sf package version promote --package <04t> --target-dev-hub <hub> --no-prompt`; then re-queries the version report. The step passes only if Salesforce shows the same 04t in the same package as Released. A CLI error followed by a Released report counts as success; a "success" followed by an unreleased report is a failure; an unreadable result is Needs Review and a retry re-queries before anything else.
+- **Receipt and history:** promotion receipt (package, Dev Hub, 04t, version, approver, evidence hash, source fingerprint, coverage, overrides, install links, next steps) plus a release-history entry; History tab lists released versions.
+- **Next-step guidance:** official production and sandbox install links, key advice, and Partner Console / AppExchange steps (explicitly outside ReleasePilot), and the reminder to move to a higher version number.
+- **Release tab** with verdict banner, summary, gate table with override controls, blockers, warnings, report Open/Export, promotion record and history.
+
+### Official-rule check
+Salesforce documentation: promotion needs at least 75% package-version coverage and every trigger covered; versions created with skip-validation cannot be promoted; only one beta can be promoted per version number; promotion cannot be reversed. These are implemented as hard gates.
+
+### Requirement IDs
+FR-24, FR-25, FR-26, FR-27 (promotion reconciliation), FR-28 (reports in Markdown/JSON/HTML), NFR-04, NFR-05, NFR-06, NFR-11 (audit trail: approver, timestamps, hashes, IDs, receipt), NFR-17; acceptance scenarios 8, 9 and 10 of the spec (stale approval, blocked promotion, verified release).
+
+### Files created or modified
+New: `src/release/{gates,store,promote}.ts`, `src/executors/release.ts`, `src/test/slice6.test.ts`, `docs/POST_MVP_PROPOSALS.md`. Modified: `src/extension.ts`, `src/ui/messages.ts`, `media/dashboard.js`, `src/test/live.test.ts`.
+
+### Tests executed
+| Category | What | Result |
+|---|---|---|
+| Mocked / unit | each gate failing alone (26 hard-gate cases, none overridable), policy gates and their overrides (scoped to version and source), evidence-hash binding, Markdown/HTML rendering with escaping and redaction, store persistence and corruption, promote command construction, install links | pass |
+| Mocked executors | review passed / blocked / needs-review / override then pass; promotion refused without review or approval (missing, wrong version, wrong hash, expired); approved promotion with intent recorded first; single-use token; unreleased after "success"; ambiguous CLI error; unverifiable result then safe retry; already-released verify-only; drift after review (test result changed, evidence file tampered); wrong package after promotion | pass |
+| **Live read-only** | real `package version list` and `report` feed the real gate logic: coverage, state, validation and uniqueness gates agree with Salesforce's data; local-evidence gates correctly keep the report not ready; no promote command issued | pass |
+| Default suite | `npm run check` | 206 passed, 7 live/local-tool tests skipped by default |
+| **Not run** | `sf package version promote` against a real Dev Hub; the promote result JSON; VS Code UI check | see limitations |
+
+### Known limitations
+- The promote command's JSON is assumed; ReleasePilot deliberately does not rely on it and verifies via the version report, but a real promotion has never been executed by this extension.
+- Uniqueness is checked on major.minor.patch; Salesforce's rule is phrased per minor version, so Salesforce can still refuse a promotion this check allowed (its message is shown and the outcome re-verified).
+- Package-level trigger coverage relies on Salesforce's `HasPassedCodeCoverageCheck`.
+- The approval is a typed 04t plus the local user name; there is no second-person (four-eyes) approval or identity provider.
+- The Release tab, modal wording and the whole dashboard have not been exercised in a live VS Code window.
+- Partner Console, AppExchange listing and security review are not automated (out of scope for v1).
+
+### Recommended next
+Manual acceptance in the Extension Development Host, then a supervised pilot with one real product on a throwaway/test package, then the proposals in `docs/POST_MVP_PROPOSALS.md`.
+
+## Slice 5 — Scratch Org Automation, Installation, and QA
+
+**State:** Implemented. Read-only queries are verified against your real orgs. **No scratch org was created, no package was installed, and nothing was assigned, opened or deleted during development**: the creation, installation, permission, script, open and delete paths are tested with a stateful mocked CLI only, so the first real run should be watched.
+
+### Completed features
+- **Prepare QA Environment** (`clean-install-qa`), one resumable orchestration with a recorded result per phase: validate the scratch definition, create the org, install dependencies, install the exact candidate 04t, verify it is really installed, assign permission sets, run project scripts, run automated checks, open the org.
+- **Definition validation before anything is created:** file inside the project, valid JSON, edition (or snapshot/source org), well-formed features and settings, with warnings for duplicate/absent features and an ignored namespace. Script paths (must be existing project `.apex` files) and permission-set names are validated up front too.
+- **Namespace-safe, non-default orgs:** always `--no-namespace` (an org carrying the package's namespace cannot install that managed package), `--no-track-source`, never `--set-default`, collision-proof alias (prefix, package, minute stamp, random suffix).
+- **Confirmation before creating:** names the Dev Hub (alias and org ID), the allocation use, alias, lifetime, definition, what will be installed, permission sets and every project script that will run in the new org. Declining performs nothing.
+- **Candidate binding:** only a promotable build (coverage check passed) of exactly the current source can be installed; otherwise `NO_CURRENT_CANDIDATE`.
+- **Installs:** non-interactive (`--no-prompt`), configurable security type, installation key asked only if the build used one and never stored; progress tracked by install request ID and polled; a wait timeout is Needs Review and a retry continues the same install. Dependencies are resolved to 04t IDs (explicit, alias, or newest matching version) and installed first, skipping any already present.
+- **Verification, not assumption:** `sf package installed list` must show the candidate 04t; permission-set assignment is queried back; smoke scripts must finish without exception.
+- **Install logs are always kept:** success or failure, a redacted install log is written as evidence. A failed org is retained for inspection; a retry builds a **new** clean org (never a repair in place) and never deletes anything.
+- **Reconciliation:** the environment is stored before the create call. After an interruption the org is looked up by alias and adopted rather than created twice; if it does not exist the record is closed as failed and a new one is made.
+- **Never auto-Passed:** when automation finishes the step is **Needs Review**. A person marks each checklist item Pass or Fail (a failure needs a description and fails the step immediately), then signs off. Sign-off is refused unless every automated phase is done, no automated check failed, the installed version is verified, every item is Pass, and the source is unchanged. The signed report (approver, time, checklist, environment, version) becomes the evidence that lets the step pass (`engine.applyManualResult`).
+- **Upgrade QA** (`upgrade-qa`): new products are skipped as not applicable. Otherwise the previous released version is the candidate's direct ancestor; ReleasePilot installs it in a fresh org (asking for its key if protected), runs seed scripts, upgrades to the candidate, runs regression scripts, then requires the upgrade-specific manual checklist and sign-off. Unsupported paths are **blocked with the reason and an alternative**: no ancestor, unresolved ancestor, ancestor is a beta (Salesforce does not allow upgrading from a beta), candidate already released. A beta can never be used as a baseline (hard guard).
+- **Cleanup:** Delete Scratch Org is explicit, only for orgs ReleasePilot created (alias and org ID must match a live scratch org of the same Dev Hub), behind a modal naming org, user and Dev Hub; reports and logs are retained.
+- **QA tab:** definition checks, environment cards (identity, versions, phases, automated checks, logs), Open Org, Delete, checklist with Pass/Fail and notes, Sign Off, and settings for lifetime, wait, security type and open-after-install.
+
+### Official-rule check (Salesforce 2GP upgrade documentation)
+Upgrading a subscriber to a beta from a released version is supported (scratch orgs and sandboxes only); upgrading from a beta is not; betas cannot be ancestors; the new version must descend from the installed one. These rules drive `evaluateUpgradePath`.
+
+### Requirement IDs
+FR-17, FR-18, FR-19, FR-20, FR-23, FR-32 (automated upgrade QA, pulled forward from P1), FR-22, FR-27 (environment and install reconciliation), NFR-03, NFR-04, NFR-05, NFR-06, NFR-09, NFR-16, NFR-20.
+
+### Files created or modified
+New: `src/qa/{parsers,scratchDef,store,ops,upgradePath,signoff}.ts`, `src/executors/qa.ts`, `src/test/slice5.test.ts`. Modified: `src/engine/workflowEngine.ts` (`applyManualResult`), `src/core/redact.ts` (session URLs), `src/packaging/parsers.ts` (ancestor, version id and key flag), `src/extension.ts`, `src/ui/{messages,dashboardPanel}.ts`, `media/dashboard.js`, `package.json` (QA settings), `src/test/live.test.ts`.
+
+### Tests executed
+| Category | What | Result |
+|---|---|---|
+| Mocked (stateful CLI simulator) | every executor outcome: success ending Needs Review, declined, stale candidate, invalid definition/scripts/permsets, key prompt and cancel, install failure with preserved log and a NEW org on retry, verification failure, failing smoke checks, install timeout then resume, interrupted-create adoption, allocation error, dependencies, upgrade ordering (baseline, seed, upgrade, regression), protected baseline key, unsupported/new-product upgrade paths | pass |
+| Mocked / unit | scratch definition rules, command construction (flags that must and must not appear), key redaction, upgrade-path matrix, sign-off blockers, manual-result rules, message validation | pass |
+| **Live read-only** | real `org list` scratch entries and `package installed list` parsed from your orgs; asserted that no create, install, assign, open or delete command was issued | pass |
+| Default suite | `npm run check` | 152 passed, 6 live/local-tool tests skipped by default |
+| **Not run** | creating a scratch org, installing, assigning permission sets, running scripts, opening and deleting an org in any real environment; VS Code UI check | see limitations |
+
+### Defects found by testing and fixed
+1. Aliases were stamped to the minute, so two orgs created in the same minute would have shared an alias (the second would overwrite the first). A random suffix was added.
+2. Install errors shaped `{message: ...}` were shown as raw JSON instead of the message.
+
+### Known limitations
+- `sf org create scratch`, `sf package install` (including the `--wait` timeout payload and the install-report JSON), `org assign permset`, `apex run` and `org delete scratch` result shapes are taken from CLI help and documentation and are not verified against live runs.
+- Dependencies given as ranges (`LATEST`) resolve to the newest matching version in the Dev Hub (released preferred); installation keys for dependencies are not supported.
+- Project scripts run arbitrary Apex in the new scratch org; they are only ever executed there, are listed in the confirmation, and require a trusted workspace.
+- Scratch org allocation is not pre-checked; exhaustion is reported with guidance when Salesforce refuses.
+- A manual sign-off is by the local user name plus the typed approver name; there is no identity verification beyond that.
+- Concurrent upgrade and fresh-install environments are independent; there is no cap on how many orgs are created over time, and cleanup is manual.
+- The QA tab and the sign-off dialogs have not been exercised in a live VS Code window.
+
+### Recommended next: Slice 6 — release readiness and controlled promotion (after approval).
+
+## Slice 4 — Managed 2GP Package Creation
+
+**State:** Implemented. Everything except the actual `sf package version create` call is verified against the real Dev Hub (read-only). **No package version was created during development**: the create path, polling and verification are tested with a mocked CLI only, and the first real build should be watched.
+
+### Completed features
+- **Package Readiness step** (read-only against the Dev Hub): managed-package type; `versionNumber` validity and that it is higher than every released version (equal or lower is a failure); ancestry (required once any version is released; HIGHEST, a released 04t or alias, or a released version number are accepted, NONE is rejected, `--skip-ancestor-check` is never used); dependencies (alias resolution, version numbers, explicit 04t looked up in the Dev Hub); no queued/in-progress build for the package; clean committed source (or explicit allowance); and proof that the passed analysis and test runs describe exactly the current source fingerprint.
+- **Create Beta Package step:**
+  - Always uses full validation and `--code-coverage`. The argument builder cannot emit `--skip-validation`, `--skip-ancestor-check` or `--async-validation`.
+  - Tags the build with the Git commit and branch.
+  - Requires an installation-key decision. The key is asked for at build time, never stored or written to reports, and redacted from logs and command history. Bypass needs the `allow-bypass` policy plus an explicit confirmation.
+  - A modal names the Dev Hub (alias and org ID), package, version and source before anything is created.
+  - Runs without `--wait`, so the 08c request is returned and **persisted immediately**, then polled (configurable interval and local limit).
+  - Verifies the result with `sf package version report` rather than trusting the create response: correct package, validation not skipped, not already released, package coverage present and at least 75%, and Salesforce's own coverage check passed.
+- **No duplicate builds:** an in-flight request of ours is resumed; identical source that already produced a 04t is not rebuilt; the Dev Hub is checked for running builds immediately before creating; if the CLI errors after registering a request, the 08c is recovered from the error payload. A local timeout is Needs Review and retrying continues the same request.
+- **Source binding:** each candidate records the source fingerprint, branch, tag, Dev Hub org and key mode. Editing source afterwards marks the build Stale (a new build is required), consistent with the spec.
+- **Package tab:** Check Readiness, Create Beta Package / Continue Tracking Build, Refresh Build Status; readiness checks table with text status; per-build card with package, Dev Hub, version, 08c, 04t, status, errors, coverage and check result, released flag, branch/tag, key mode, fingerprint and timestamps.
+- **Reports:** readiness report, build request and version report are saved as evidence and appear under Reports & Artifacts (Open / Export).
+- **Gates:** Package Readiness cannot run before tests pass; Create Beta Package cannot run before readiness passes; Clean-install QA stays blocked until a promotable 04t exists. A build whose coverage check failed is recorded but marked `PACKAGE_NOT_PROMOTABLE`.
+
+### Requirement IDs
+FR-14, FR-15, FR-16, FR-22, FR-27 (build resume after restart), FR-28 (build reports), NFR-02, NFR-03, NFR-04 (Dev Hub identity in the confirmation), NFR-05, NFR-06, NFR-16 (confirmation before consuming a build), NFR-20.
+
+### Files created or modified
+New: `src/packaging/{versions,parsers,store,readiness,build}.ts`, `src/executors/packaging.ts`, `src/test/slice4.test.ts`. Modified: `src/adapters/sfCli.ts` (SfError carries the CLI result), `src/extension.ts`, `src/ui/{messages,dashboardPanel}.ts`, `media/dashboard.js`, `package.json` (installationKeyPolicy, buildWaitMinutes, buildPollSeconds), `src/test/live.test.ts`.
+
+### Tests executed
+| Category | What | Result |
+|---|---|---|
+| Mocked | argument construction and forbidden flags, key redaction, readiness rules (ancestry, versions, dependencies, in-flight, source, validation freshness), store persistence, polling and timeout, 08c recovery, every build outcome (success, bypass, declined, key cancelled, build error, low coverage, validation skipped, wrong package, timeout then resume, no rebuild, running build, rejected creation, stale readiness) | pass |
+| **Live read-only** | real `package version list`, `create list`, `create report`, `package version report` parsed from the actual Dev Hub (22 versions, a real 04t report, a real 08c request); asserted that no create command was issued | pass |
+| Default suite | `npm run check` | 116 passed, 5 live/local-tool tests skipped by default; all 121 pass with `RP_LIVE=1` |
+| **Not run** | `sf package version create` against a real Dev Hub; VS Code UI check | see limitations |
+
+### Known limitations
+- The create command's JSON when run without `--wait` (status `Queued`, `Id` present) is assumed from CLI behaviour and documentation, and is handled defensively, but it is unverified against a real build.
+- Salesforce's rule that every package trigger needs coverage is enforced through `HasPassedCodeCoverageCheck`; ReleasePilot does not independently inspect trigger coverage.
+- Version-number rules are a conservative subset of Salesforce's; Salesforce remains the final authority at build time and its error is surfaced.
+- The Salesforce CLI only accepts the installation key as a command-line argument, so it is briefly visible to other processes of the same user on that machine; ReleasePilot redacts it everywhere it records anything.
+- Only the last 3 days of build requests are inspected for in-flight builds (older still-running requests are not expected).
+- Package version dependencies are verified only for explicit 04t IDs, not for `LATEST`-style ranges.
+- The Package tab has not been exercised in a live VS Code window.
+
+### Recommended next: Slice 5 — scratch org automation, installation and QA (after approval).
+
+## Slice 3 — Code Analyzer, Automated Testing, and Reports
+
+**State:** Implemented. Static analysis is verified end to end against the real Code Analyzer plugin. Apex testing and deployment are verified only with a mocked CLI because no validation org was designated, so no test run or deployment was executed in any real org.
+
+### Completed features
+- **Static analysis step** (`sf code-analyzer run`, JSON + HTML reports with fixes and suggestions requested): findings normalized (severity, rule, engine, file, line/column, message, tags, docs, fix, suggestions); grouping by file, severity or rule; filter; open-in-editor at the exact line; rescan; configurable rule selectors (e.g. add AppExchange) and severity gate (default: High and above).
+- **Outdated-scan detection:** each report stores the source fingerprint; the UI flags a scan or test run as OUTDATED when the live fingerprint differs, and editing source marks Source Ready and everything after it Stale.
+- **Incomplete-scan protection:** the JSON report does not record engine failures. A file PMD cannot parse produced no finding at all (found by live testing), so the CLI's `»` warning blocks are captured; any non-benign block makes the step Needs Review (`ANALYZER_WARNINGS`) instead of a clean pass.
+- **Triage:** a finding can be dismissed only with a written reason (min. 10 characters), owner and timestamp; entries are listed in the UI and the export, are removable, and changing them invalidates the analysis result.
+- **Fixes:** analyzer-provided fixes are applied only after a diff view and a modal confirmation, and only if the source is unchanged since the scan. Every fix is treated as behaviour-changing. (AI remediation is deliberately left to a later slice.)
+- **Pre-package Tests step:** requires an explicit validation org (never defaulted, never the Dev Hub, not expired); modal confirmation naming org, ID, type and what will happen; optional deploy of the package directories (`sf project deploy start --source-dir`, never any ignore flag) so the tests exercise the local source; `sf apex run test --code-coverage`; parsed pass/fail/skip counts, failure messages and stack traces, per-class coverage.
+- **Coverage honesty:** the figure is the validation org's org-wide coverage, compared with the configurable internal target (default 80%) and labelled "not package-version coverage"; the 75%/all-triggers package rule is documented as a Slice 4 build-time check.
+- **Source-not-proven rule:** if local source was not deployed by ReleasePilot, tests cannot Pass; they end Needs Review (`SOURCE_NOT_VERIFIED_IN_ORG`).
+- **LWC Jest:** detected from `package.json` + jest config; run through node on the project's own sfdx-lwc-jest; `NOT_CONFIGURED` is recorded without failing; configured-but-not-installed is Needs Review.
+- **Failed-test rerun:** reruns only the failed tests (`RunSpecifiedTests`) after confirmation; stored as informational and never satisfies the gate.
+- **Reports:** Open and Export buttons for every artifact (only known artifact paths are accepted); consolidated Markdown quality summary export with fingerprints, blockers, triage, failed tests, coverage and the disclaimer.
+- **Dependent steps blocked:** Package Readiness cannot run until Pre-package Tests passes, which cannot run until Static Analysis passes.
+- **UI:** new Quality tab, Validation org selector, severity gate / test level / deploy-before-tests / wait-time settings.
+
+### Requirement IDs
+FR-07, FR-08, FR-09, FR-10, FR-11, FR-12, FR-13, FR-22, FR-28 (analysis and test portions), FR-30 (fix review; fully verified only with mocked fix data); NFR-02, NFR-03, NFR-04 (validation org identity and Dev Hub exclusion), NFR-06, NFR-09, NFR-15.
+
+### Files created or modified
+New: `src/analysis/{analyzer,triage}.ts`, `src/testing/{apex,lwc,qualityStore,summary}.ts`, `src/executors/quality.ts`, `src/test/slice3.test.ts`. Modified: `src/adapters/sfCli.ts` (stderr capture), `src/discovery/{discoveryService,projectConfig}.ts` (validation org), `src/extension.ts`, `src/ui/{messages,dashboardPanel}.ts`, `media/{dashboard.js,dashboard.css}`, `package.json` (settings), `src/test/live.test.ts`.
+
+### Tests executed
+| Category | What | Result |
+|---|---|---|
+| Mocked | analyzer/Apex/deploy parsing and command construction, gates, executors for every outcome (no org, Dev Hub as org, declined, deploy failure, test failure, low coverage, unverified source, triage, warnings), summary export, message validation | pass |
+| Local integration | real fix application; LWC Jest plumbing with a fake Jest binary run through the real process runner | pass |
+| Local real tool (no org) | real Code Analyzer v5 plugin on a throwaway project: 8 findings parsed, zero warnings; a deliberately unparseable file is flagged as an incomplete scan | pass |
+| Live read-only (earlier slice) | org / package queries | pass (88/88 with `RP_LIVE=1`) |
+| Default suite | `npm run check` | 84 passed, 4 live/local-tool tests skipped |
+| **Not run** | Apex tests and deployment in a real org; real analyzer fixes (the installed engines emitted none); VS Code UI check | see limitations |
+
+### Defects found by real-tool testing and fixed
+1. A file that PMD cannot parse yields **no finding**; the failure appears only in CLI warnings. Without capturing them a broken class would give a clean scan.
+2. A naive "any warning blocks" rule would have blocked every scan: healthy runs always print a "Could not find typescript" notice. Warnings are now grouped into blocks and known-benign notices ignored.
+
+### Known limitations
+- The Apex result shape (`summary.orgWideCoverage`, `tests[]`, `coverage.coverage[]`) follows Salesforce documentation and is **not verified against a live org**. The first real run should be reviewed before relying on the gate.
+- The `fixes[]`/`suggestions[]` shape follows documentation; the installed engines produced none to verify against.
+- Deploy-then-test writes to the chosen validation org by design (after confirmation). Test runs create Apex test run records there.
+- A local timeout leaves the remote job running; the step is Needs Review rather than Failed.
+- Warning classification relies on the CLI's `»` markers and a short benign list; new CLI wording could need an update.
+- The Quality tab and diff-based fix flow have not been exercised in a live VS Code window.
+
+### Recommended next: Slice 4 — managed 2GP package creation (after approval).
+
+## Slice 2 — Salesforce Integration and Project Discovery
+
+**State:** Implemented; automated and live read-only checks pass. Interactive check in the Extension Development Host is still a manual step for the user.
+
+### Completed features
+- **Process runner** (`src/adapters/processRunner.ts`): `spawn` with `shell:false` and argument arrays, real-time line streaming, timeout, abort, output cap, unsafe-argument rejection.
+- **Salesforce CLI adapter** (`sfCli.ts`): resolves `sf` without a shell (node + `run.js` for npm installs on Windows), JSON envelope parsing tolerant of warning noise, error mapping with remediation (missing org, expired auth, network, unavailable command), alias/ID validation, redacted command history.
+- **Whitelist parsers** (`discovery/parsers.ts`): `sf org list --json` contains `accessToken` for every org; only named non-secret fields are copied, so tokens cannot reach the UI, logs or state.
+- **Project discovery**: `sfdx-project.json` (package directories, aliases to 0Ho IDs, dependencies, ancestors, namespace, version format warnings); Git snapshot (branch, HEAD, uncommitted files, content-based fingerprint that excludes `.releasepilot.json`); tooling versions (sf, Code Analyzer v5, legacy scanner, Git, Node).
+- **Org / Dev Hub / package discovery**: authenticated orgs, Dev Hub flag, defaults from `sf config`, Dev Hub packages and the latest 15 package versions with release/coverage fields.
+- **Per-project config** `.releasepilot.json` (aliases only, validated, atomic write, no secrets).
+- **Real Preflight and Source Ready executors** with JSON report evidence: DX project, package config, CLI, Code Analyzer v5, Git, Dev Hub, package ownership by the selected Dev Hub, namespace match. Failures carry remediation. Source Ready becomes Needs Review for uncommitted changes unless `releasepilot.allowDirtySource` is enabled.
+- **Freshness**: a debounced watcher compares the live Git fingerprint with the Source step's fingerprint; changes mark Source and everything downstream Stale. Changing Dev Hub, package or project marks Preflight Stale.
+- **Conflict-safe retrieval**: `sf project retrieve preview` then `start`, only after a fresh preview of the same org against the unchanged working tree. Blocks on conflicts, on overlap with uncommitted edits, on non-Git projects and on orgs without source tracking; asks for confirmation when unrelated edits exist; never passes `--ignore-conflicts`. Reports are kept as artifacts.
+- **UI**: new Project tab (project, packages, tooling, Git, orgs, Dev Hub package versions, retrieval preview/apply, executed commands with exit code and duration), live Project/Development org/Dev Hub selectors, busy and error banners, discovery errors in the Errors tab, artifacts in the Reports tab, "allow uncommitted source" setting.
+
+### Requirement IDs
+FR-01, FR-02, FR-03, FR-04 (single project at a time), FR-06, FR-14 (pre-build inspection; deeper checks in Slice 4), FR-22 (commands shown, redacted), FR-29 (preview-based; manifest selection not yet), NFR-01, NFR-02, NFR-03, NFR-04 (Dev Hub/package ownership check), NFR-06, NFR-09, NFR-15.
+
+### Files created or modified
+`src/adapters/{processRunner,sfCli,git,commandHistory}.ts`, `src/discovery/{project,parsers,projectConfig,discoveryService,retrieval}.ts`, `src/executors/{executors,reportWriter}.ts`, `src/engine/workflowEngine.ts` (markStale, artifacts), `src/core/models.ts`, `src/extension.ts`, `src/ui/{messages,dashboardPanel}.ts`, `media/dashboard.js`, `package.json`, tests `src/test/{slice2,live}.test.ts`.
+
+### Tests executed
+| Category | What | Result |
+|---|---|---|
+| Mocked | CLI adapter, parsers, preflight evaluation, retrieval safety rules (mocked `sf`), message validation | pass |
+| Local integration | real process runner (injection resistance, timeout, abort), real `git` repos (fingerprints, dirty states), real `sf --version` | pass |
+| **Live read-only** (`RP_LIVE=1`) | real `sf org list`, `package list`, `package version list` against locally authenticated orgs; preflight pass for an owned package and fail for an unknown one | 2/2 pass |
+| Default suite | `npm run check` (tsc, eslint, vitest, bundle) | 53 passed, 2 live skipped |
+| Not run | retrieve `start` against a real org (would modify local files from a live org), VS Code UI check | manual / not executed |
+
+### Defects found by live testing and fixed
+1. Code Analyzer v5 was not detected: the plugin is named `@salesforce/plugin-code-analyzer`. Detection now parses plain `sf plugins` output (the `--json` form returns megabytes of internal data) and ignores the "Uninstalled JIT Plugins" section.
+2. CLI warnings containing braces broke JSON extraction; extraction now tries each candidate start and requires a valid `status` envelope.
+3. With no package selected, a package without an alias matched `undefined === undefined`, so an unowned project package could appear owned. Fixed; preflight now fails "Package ownership" correctly.
+
+### Known limitations
+- `sf project retrieve start` was verified only with a mocked CLI; no live retrieval was run.
+- Retrieval needs source-tracking orgs; manifest-based selection is not implemented.
+- One project/Dev Hub is active at a time (FR-04 multi-product handling is basic).
+- Steps beyond Preflight and Source Ready have no executors (Slices 3-6).
+- No automated regression test yet for the package-selection fix beyond the live test.
+- Dashboard/theme behaviour still needs a manual F5 check; no extension-host test.
+
+### Recommended next: Slice 3 — Code Analyzer, tests, coverage and reports (after approval).
+
+## Slice 1 — VS Code Extension Foundation and UI
+
+**State:** Implemented and verified by automated checks. Interactive verification in the Extension Development Host is a manual step for the user (see "Known limitations"). Not marked fully accepted until that is done.
+
+### Completed features
+- Extension scaffold (TypeScript, esbuild bundle, ESLint, Vitest), F5 launch config.
+- Activity bar container, "Release Pipeline" tree with status icons and inline Run/Retry/Cancel.
+- Dashboard webview: project selector (workspace folders), org/Dev Hub selectors (disabled placeholders until Slice 2), pipeline timeline with expandable step panels, Resume Pipeline, New Release Run, Logs, Errors, Reports & Artifacts, Release History, Settings tabs. UI tab/expansion state survives panel reloads.
+- Typed models: nine statuses, steps, runs, evidence, failures, log entries.
+- Workflow engine: dependency gating, approval gating, Workspace Trust gating, evidence-required success, required-step-skip rejection, local timeout → needs-review, local cancel, downstream staleness, resume, run archive.
+- Persistent state (atomic JSON, corrupt-file quarantine, interrupted-run recovery).
+- Structured logger with persisted ring buffer, Output Channel sink and secret redaction.
+- Light/dark theme via VS Code variables; status shown by icon and text.
+- Secure webview: nonce CSP, restricted resource roots, validated messages, no innerHTML.
+
+### Honesty note
+No step executors exist yet, so **no step can be run and none can show Passed**. "Run" is disabled with an explanation and the engine returns `NOT_IMPLEMENTED` without altering state.
+
+### Requirement IDs
+FR-05 (statuses/timeline), FR-21 (engine support), FR-22 (logging/redaction foundation), FR-27 (local state restore), NFR-01, NFR-02 (redaction), NFR-05 (partial), NFR-07, NFR-08, NFR-14, NFR-18, NFR-12.
+
+### Files
+`package.json`, `tsconfig.json`, `esbuild.mjs`, `eslint.config.mjs`, `vitest.config.mts`, `.gitignore`, `.vscodeignore`, `.vscode/{launch,tasks}.json`, `media/{icon.svg,dashboard.css,dashboard.js}`, `src/extension.ts`, `src/core/{models,pipeline,logger,redact}.ts`, `src/engine/{workflowEngine,stateStore}.ts`, `src/ui/{dashboardPanel,pipelineTree,messages}.ts`, `src/test/engine.test.ts`, `docs/*`, `CLAUDE.md`, `README.md`, `CHANGELOG.md`.
+
+### Tests executed (all local/mocked; no live Salesforce)
+| Check | Result |
+|---|---|
+| `tsc --noEmit` | pass |
+| `eslint src` | pass |
+| `vitest run` (18 unit tests: engine, store, redaction, message validation) | 18 passed |
+| `esbuild` bundle | pass (`dist/extension.js` 29 kB) |
+| VS Code extension-host test / visual check | **not executed** (requires GUI; see below) |
+
+### Known limitations
+- Dashboard rendering and theming not exercised automatically; needs F5 check.
+- No `@vscode/test-electron` integration tests yet (planned alongside Slice 2).
+- Org/Dev Hub selectors are placeholders.
+- Step timeout setting is read at activation (reload to apply).
+- Dev dependency audit warnings from `npm install` not yet reviewed.
+
+### Git
+Branch `feature/releasepilot-initial-development`. Commit hash recorded in the hand-off message.
+
+### Recommended next: Slice 2 — Salesforce integration and project discovery.

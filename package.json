@@ -1,0 +1,140 @@
+{
+  "name": "releasepilot",
+  "displayName": "ReleasePilot",
+  "description": "Guided, evidence-based release automation for Salesforce managed 2GP packages.",
+  "version": "0.1.0",
+  "publisher": "TwinStackSolutions",
+  "license": "UNLICENSED",
+  "private": true,
+  "repository": { "type": "git", "url": "https://github.com/DemoProjectDjango/ReleasePilot.git" },
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "ReleasePilot only displays state in untrusted workspaces. Running workflow steps requires a trusted workspace."
+    }
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [{ "id": "releasepilot", "title": "ReleasePilot", "icon": "media/icon.svg" }]
+    },
+    "views": {
+      "releasepilot": [{ "id": "releasepilot.pipeline", "name": "Release Pipeline" }]
+    },
+    "viewsWelcome": [{
+      "view": "releasepilot.pipeline",
+      "contents": "Open the ReleasePilot dashboard to manage your Salesforce 2GP release.\n[Open Dashboard](command:releasepilot.openDashboard)"
+    }],
+    "commands": [
+      { "command": "releasepilot.openDashboard", "title": "Open Dashboard", "category": "ReleasePilot", "icon": "$(dashboard)" },
+      { "command": "releasepilot.refresh", "title": "Refresh", "category": "ReleasePilot", "icon": "$(refresh)" },
+      { "command": "releasepilot.runStep", "title": "Run Step", "category": "ReleasePilot", "icon": "$(play)" },
+      { "command": "releasepilot.retryStep", "title": "Retry Step", "category": "ReleasePilot", "icon": "$(debug-restart)" },
+      { "command": "releasepilot.resumePipeline", "title": "Resume Pipeline", "category": "ReleasePilot", "icon": "$(debug-continue)" },
+      { "command": "releasepilot.cancelStep", "title": "Cancel Step", "category": "ReleasePilot", "icon": "$(debug-stop)" },
+      { "command": "releasepilot.newRun", "title": "Start New Release Run", "category": "ReleasePilot", "icon": "$(add)" },
+      { "command": "releasepilot.showLogs", "title": "Show Output Log", "category": "ReleasePilot" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "releasepilot.openDashboard", "when": "view == releasepilot.pipeline", "group": "navigation@1" },
+        { "command": "releasepilot.refresh", "when": "view == releasepilot.pipeline", "group": "navigation@2" }
+      ],
+      "view/item/context": [
+        { "command": "releasepilot.runStep", "when": "view == releasepilot.pipeline && viewItem == step-runnable", "group": "inline" },
+        { "command": "releasepilot.retryStep", "when": "view == releasepilot.pipeline && viewItem == step-retryable", "group": "inline" },
+        { "command": "releasepilot.cancelStep", "when": "view == releasepilot.pipeline && viewItem == step-running", "group": "inline" }
+      ]
+    },
+    "configuration": {
+      "title": "ReleasePilot",
+      "properties": {
+        "releasepilot.coverageTargetPercent": {
+          "type": "number", "default": 80, "minimum": 0, "maximum": 100,
+          "description": "Internal org-level Apex coverage target. Does not replace Salesforce's mandatory 75% package-version coverage."
+        },
+        "releasepilot.logRetentionEntries": {
+          "type": "number", "default": 2000, "minimum": 100, "maximum": 50000,
+          "description": "Maximum number of log entries kept in the persisted log."
+        },
+        "releasepilot.allowDirtySource": {
+          "type": "boolean", "default": false,
+          "description": "Allow the Source Ready step to pass with uncommitted changes. Release candidates should normally be built from committed source."
+        },
+        "releasepilot.ruleSelectors": {
+          "type": "array", "items": { "type": "string" }, "default": ["Recommended"],
+          "description": "Code Analyzer v5 rule selectors, e.g. Recommended, AppExchange, Recommended:Security."
+        },
+        "releasepilot.severityGate": {
+          "type": "string", "enum": ["none", "critical", "high", "moderate", "low"], "default": "high",
+          "description": "Untriaged findings at or above this severity block the pipeline."
+        },
+        "releasepilot.testLevel": {
+          "type": "string", "enum": ["RunLocalTests", "RunAllTestsInOrg"], "default": "RunLocalTests",
+          "description": "Apex test level for the Pre-package Tests step."
+        },
+        "releasepilot.deployBeforeTests": {
+          "type": "boolean", "default": true,
+          "description": "Deploy the local package directories to the validation org (after confirmation) so tests exercise the current source. If disabled, test results cannot pass the gate."
+        },
+        "releasepilot.testWaitMinutes": {
+          "type": "number", "default": 60, "minimum": 1, "maximum": 600,
+          "description": "Minutes to wait for deployments and Apex test runs. A local timeout never cancels remote jobs."
+        },
+        "releasepilot.installationKeyPolicy": {
+          "type": "string", "enum": ["require", "allow-bypass"], "default": "require",
+          "description": "require: every package version needs an installation key (asked at build time, never stored). allow-bypass: an empty key may be used after an explicit confirmation."
+        },
+        "releasepilot.buildWaitMinutes": {
+          "type": "number", "default": 90, "minimum": 1, "maximum": 720,
+          "description": "How long ReleasePilot tracks a package build locally. A timeout never cancels the build; retrying continues tracking the same request."
+        },
+        "releasepilot.buildPollSeconds": {
+          "type": "number", "default": 15, "minimum": 5, "maximum": 120,
+          "description": "Seconds between package build status checks."
+        },
+        "releasepilot.scratchDefinitionFile": {
+          "type": "string", "default": "config/project-scratch-def.json",
+          "description": "Project-relative scratch org definition used for QA orgs. QA orgs are always created without a namespace so the managed package can be installed."
+        },
+        "releasepilot.qaOrgDurationDays": { "type": "number", "default": 7, "minimum": 1, "maximum": 30, "description": "Days before a QA scratch org expires." },
+        "releasepilot.qaWaitMinutes": { "type": "number", "default": 30, "minimum": 1, "maximum": 120, "description": "Minutes to wait for scratch org creation and each package installation." },
+        "releasepilot.qaSecurityType": { "type": "string", "enum": ["AdminsOnly", "AllUsers"], "default": "AdminsOnly", "description": "Security access type used when installing the package into QA orgs." },
+        "releasepilot.qaPermissionSets": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Permission sets assigned to the QA org's admin user after installation (API names, including any namespace prefix)." },
+        "releasepilot.qaInitScripts": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project-relative .apex files run in a fresh QA org after installation. They execute in the new scratch org only, and are listed in the confirmation prompt." },
+        "releasepilot.qaSmokeScripts": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project-relative .apex smoke checks; each must finish without an exception." },
+        "releasepilot.upgradeSeedScripts": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project-relative .apex files that create baseline test data after the previous released version is installed (upgrade tests)." },
+        "releasepilot.upgradeRegressionScripts": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project-relative .apex regression checks run after the upgrade." },
+        "releasepilot.openOrgAfterInstall": { "type": "boolean", "default": true, "description": "Open the QA org in the browser when preparation finishes." },
+        "releasepilot.qaChecklist": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Manual QA checklist items for fresh-install QA. Empty uses the built-in checklist." },
+        "releasepilot.upgradeChecklist": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Manual QA checklist items for upgrade QA. Empty uses the built-in checklist." },
+        "releasepilot.qaAliasPrefix": { "type": "string", "default": "rp", "pattern": "^[a-z][a-z0-9-]{0,15}$", "description": "Prefix for aliases of scratch orgs created by ReleasePilot." },
+        "releasepilot.stepTimeoutMinutes": {
+          "type": "number", "default": 60, "minimum": 1, "maximum": 720,
+          "description": "Local wait timeout for a workflow step. A timeout does not cancel remote Salesforce jobs."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./ --noEmit && node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p ./ --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run lint && npm test && node esbuild.mjs",
+    "vscode:prepublish": "node esbuild.mjs --production"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.0.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^3.0.0"
+  }
+}
