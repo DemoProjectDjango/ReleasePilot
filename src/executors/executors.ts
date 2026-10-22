@@ -103,7 +103,10 @@ export function createExecutors(deps: ExecutorDeps): Partial<Record<StepId, Step
     })];
     const fingerprint = sha256(JSON.stringify({ hub: snap.devHub?.orgId, pkg: snap.selectedPackage?.id, ns: snap.project?.namespace }));
     if (failed.length) {
-      return { status: 'failed', evidence, fingerprint, message: `${failed.length} preflight check(s) failed.`, failure: fail(failed[0]) };
+      return {
+        status: 'failed', evidence, fingerprint, message: `${failed.length} preflight check(s) failed: ${failed.map(c => c.name).join(', ')}.`,
+        failure: { ...fail(failed[0])!, detail: failed.map(c => `${c.name}: ${c.detail}${c.remediation ? ` -> ${c.remediation}` : ''}`).join('\n') }
+      };
     }
     const warns = checks.filter(c => c.status === 'warn').length;
     return { status: 'passed', evidence, fingerprint, message: `${checks.length} checks passed${warns ? ` (${warns} warning(s))` : ''}.` };

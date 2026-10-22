@@ -73,6 +73,7 @@
         step.message ? el('p', {}, step.message) : null,
         step.failure ? el('div', { class: 'err' },
           el('strong', {}, step.failure.code + ': '), step.failure.message,
+          step.failure.detail ? el('pre', { class: 'log-line' }, step.failure.detail) : null,
           step.failure.remediation ? el('div', { class: 'muted' }, 'Next: ' + step.failure.remediation) : null) : null,
         el('p', { class: 'muted' }, 'Requirements: ' + def.requirements.join(', ') + ' · Attempts: ' + step.attempt +
           (step.startedAt ? ' · Started: ' + fmt(step.startedAt) : '') + (step.endedAt ? ' · Ended: ' + fmt(step.endedAt) : '')),
