@@ -14,6 +14,8 @@ npm run check      # typecheck + lint + tests + bundle
 # Optional: read-only live checks against the orgs authenticated in your Salesforce CLI
 $env:RP_LIVE=1; npx vitest run src/test/live.test.ts
 ```
+Dashboard UI can be previewed without VS Code: `powershell -File tools/preview/shot.ps1 -Tabs "pipeline,quality" -Theme dark` (headless Edge/Chrome, mock data).
+
 Press **F5** in VS Code to launch the Extension Development Host, open a Salesforce DX project folder, click the ReleasePilot icon in the Activity Bar and choose **Open Dashboard**.
 
 ## Docs

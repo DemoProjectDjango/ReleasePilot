@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 ### Added
+- Dashboard redesign: sidebar navigation with status dots, sticky project/org context bar, stat tiles per page, card sections, stepper pipeline with auto-opening failed steps, pills and inline icons, grouped settings with switches, structured log view, responsive layout, theme-aware light/dark. Fixes stray "null" text in the header.
+- tools/preview: headless screenshot harness for the dashboard.
 - Slice 6: release readiness with 15 gates and hash-bound evidence, overridable local policy vs hard platform blockers, JSON/Markdown/HTML reports, typed-confirmation single-use promotion approval, promotion with intent recording and Salesforce verification, receipts, release history, Release tab.
 - Slice 5: scratch org QA automation (create, install, verify, permission sets, scripts, open), automated upgrade testing with Salesforce's beta rules, manual QA checklist with signed results, reconciliation and cleanup, QA tab.
 - Slice 4: package readiness checks, beta package creation with persisted 08c tracking, 04t verification against the version report, duplicate-build protection, installation-key handling, Package tab.

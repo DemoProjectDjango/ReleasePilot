@@ -16,3 +16,5 @@ VS Code extension (TypeScript) automating the Salesforce managed 2GP release lif
 - Verify CLI syntax with `--help` before using a command.
 - Webview: nonce CSP, validated messages, no innerHTML.
 - Keep README, CHANGELOG and IMPLEMENTATION_STATUS in sync. Don't commit `.sf/`, `.sfdx/`, auth files, `.env`.
+- UI work: preview the dashboard without VS Code using `tools/preview` (mock data and theme variables). Render with `powershell -File tools/preview/shot.ps1 -Tabs "pipeline,quality" -Theme dark|light [-Scenario failed-start] [-Width 700]` (headless Edge/Chrome) and look at the PNGs. Check dark, light and a narrow width.
+- Webview markup is built only with `el()`/`textContent` (no innerHTML); icons are inline SVG created with `createElementNS`.

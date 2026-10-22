@@ -9,3 +9,4 @@ eslint.config.mjs
 vitest.config.mts
 tsconfig.json
 CLAUDE.md
+tools/**
