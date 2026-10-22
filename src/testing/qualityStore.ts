@@ -6,6 +6,8 @@ import { LwcRun } from './lwc';
 
 export interface QualityState {
   analysis?: AnalysisReport;
+  /** Ad-hoc scan outside the pipeline; never release evidence. */
+  quick?: AnalysisReport;
   apex?: ApexRun;
   lwc?: LwcRun;
   /** Result of re-running only failed tests; informational, never satisfies the gate. */

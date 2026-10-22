@@ -25,6 +25,9 @@ import { deleteScratch, listScratchOrgs, openOrg } from './qa/ops';
 import { validateScratchDefinition } from './qa/scratchDef';
 import { signOffBlockers } from './qa/signoff';
 import { QaStore } from './qa/store';
+import { buildSetup, setupCommand } from './discovery/setup';
+import { findInReports, pickAnalysis } from './testing/analysisView';
+import { runCodeAnalyzer } from './analysis/analyzer';
 import { ApprovalToken, createReleaseExecutors } from './executors/release';
 import { installLinks, nextSteps } from './release/promote';
 import { ReleaseStore } from './release/store';
@@ -214,13 +217,15 @@ export function activate(context: vscode.ExtensionContext): void {
     const settings = qualitySettings();
     const triaged = triage.keys();
     const outdated = (fp?: string) => !!fp && !!lastFingerprint && fp !== lastFingerprint;
+    const shown = pickAnalysis(q);
     return {
-      analysis: q.analysis && {
-        ...q.analysis,
-        findings: q.analysis.findings.slice(0, 3000).map(f => ({ ...f, absFile: undefined, triaged: triaged.has(f.key) })),
-        truncated: q.analysis.findings.length > 3000,
-        blockers: gateBlockers(q.analysis.findings, settings.severityGate, triaged).length,
-        outdated: outdated(q.analysis.sourceFingerprint)
+      analysis: shown.report && {
+        ...shown.report,
+        adHoc: shown.adHoc,
+        findings: shown.report.findings.slice(0, 3000).map(f => ({ ...f, absFile: undefined, triaged: triaged.has(f.key) })),
+        truncated: shown.report.findings.length > 3000,
+        blockers: gateBlockers(shown.report.findings, settings.severityGate, triaged).length,
+        outdated: outdated(shown.report.sourceFingerprint)
       },
       apex: q.apex && { ...q.apex, outdated: outdated(q.apex.sourceFingerprint), gate: evaluateApex(q.apex, settings.coverageTargetPercent) },
       lwc: q.lwc,
@@ -264,6 +269,7 @@ export function activate(context: vscode.ExtensionContext): void {
     quality: qualityView(),
     packaging: packagingView(),
     qa: qaView(),
+    setup: buildSetup(discovery.snapshot),
     release: releaseView(),
     busy,
     notice,
@@ -318,14 +324,14 @@ export function activate(context: vscode.ExtensionContext): void {
     Object.values(st.run.steps).forEach(s => s.evidence.forEach(e => refs.add(e.ref)));
     (st.artifacts ?? []).forEach(e => refs.add(e.ref));
     const q = quality.get();
-    [q.analysis?.jsonPath, q.analysis?.htmlPath, q.apex?.rawPath, q.lwc?.rawPath, q.rerun?.rawPath].forEach(r => r && refs.add(r));
+    [q.analysis?.jsonPath, q.analysis?.htmlPath, q.quick?.jsonPath, q.quick?.htmlPath, q.apex?.rawPath, q.lwc?.rawPath, q.rerun?.rawPath].forEach(r => r && refs.add(r));
     return refs;
   };
   const isInside = (parent: string, child: string) => {
     const rel = path.relative(parent, child);
     return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
   };
-  const findFinding = (key: string) => quality.get().analysis?.findings.find(f => f.key === key);
+  const findFinding = (key: string) => findInReports(quality.get(), key)?.finding;
 
   const openFinding = async (key: string) => {
     const root = getRoot();
@@ -380,8 +386,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const reviewAndApplyFix = async (key: string) => {
     const root = getRoot();
-    const q = quality.get().analysis;
-    const f = findFinding(key);
+    const hit = findInReports(quality.get(), key);
+    const q = hit?.report;
+    const f = hit?.finding;
     if (!root || !q || !f?.fix || !f.absFile || !isInside(root, f.absFile)) {
       notice = { level: 'error', text: 'No applicable analyzer fix is available for that finding.' };
       return;
@@ -792,6 +799,39 @@ export function activate(context: vscode.ExtensionContext): void {
           packaging.upsert({ ...live, status: r.status, errors: r.errors, subscriberPackageVersionId: r.subscriberPackageVersionId ?? live.subscriberPackageVersionId, lastPolledAt: new Date().toISOString() });
           notice = { level: 'info', text: `Request ${live.requestId} is ${r.status}. Run the Create Beta Package step again to finish verification.` };
         });
+        break;
+      }
+      case 'quickScan': {
+        const root = getRoot();
+        if (!root || !trusted() || !discovery.snapshot.project) {
+          notice = { level: 'error', text: !discovery.snapshot.project ? 'Open a Salesforce DX project first.' : 'A trusted workspace is required.' };
+          refreshUi();
+          break;
+        }
+        await withBusy('Scanning with Code Analyzer', async () => {
+          const report = await runCodeAnalyzer(sf, { root, outputDir: reportsDir, selectors: qualitySettings().ruleSelectors });
+          report.sourceFingerprint = (await git.snapshot(root)).fingerprint;
+          quality.update({ quick: report });
+          logger.log('info', 'analysis', `Quick scan: ${report.counts.total} finding(s), ${report.warnings.length} warning(s). Not release evidence.`);
+          notice = { level: report.warnings.length ? 'error' : 'info', text: report.warnings.length
+            ? 'Quick scan finished with analyzer warnings, so it may be incomplete. See the Quality page.'
+            : `Quick scan finished: ${report.counts.total} finding(s). This is ad hoc and not part of the release evidence.` };
+        });
+        break;
+      }
+      case 'openProject': {
+        const file = discovery.snapshot.project?.file;
+        if (file && fs.existsSync(file)) {
+          await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(file));
+        }
+        break;
+      }
+      case 'copyCmd': {
+        const text = setupCommand(msg.id, discovery.snapshot);
+        if (text) {
+          await vscode.env.clipboard.writeText(text);
+          notice = { level: 'info', text: `Copied to clipboard: ${text}` };
+        }
         break;
       }
       case 'overrideGate':

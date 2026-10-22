@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ### Added
+- Getting-ready checklist (spec FR-35, advisory only) with copy-command and open-file buttons; Quick scan for ad-hoc Code Analyzer runs that never count as release evidence.
 - Dashboard redesign: sidebar navigation with status dots, sticky project/org context bar, stat tiles per page, card sections, stepper pipeline with auto-opening failed steps, pills and inline icons, grouped settings with switches, structured log view, responsive layout, theme-aware light/dark. Fixes stray "null" text in the header.
 - tools/preview: headless screenshot harness for the dashboard.
 - Slice 6: release readiness with 15 gates and hash-bound evidence, overridable local policy vs hard platform blockers, JSON/Markdown/HTML reports, typed-confirmation single-use promotion approval, promotion with intent recording and Salesforce verification, receipts, release history, Release tab.

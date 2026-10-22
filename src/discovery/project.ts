@@ -25,6 +25,8 @@ export interface PackageDirectory {
 export interface ProjectInfo {
   root: string;
   file: string;
+  /** "name" from sfdx-project.json, if any. */
+  name?: string;
   sourceApiVersion?: string;
   namespace?: string;
   packageDirectories: PackageDirectory[];
@@ -104,7 +106,7 @@ export function parseProject(root: string, text: string, dirExists: (p: string) 
   }
   return {
     root, file: path.join(root, 'sfdx-project.json'),
-    sourceApiVersion: str(json.sourceApiVersion), namespace: str(json.namespace),
+    name: str(json.name), sourceApiVersion: str(json.sourceApiVersion), namespace: str(json.namespace),
     packageDirectories, packageAliases, warnings
   };
 }

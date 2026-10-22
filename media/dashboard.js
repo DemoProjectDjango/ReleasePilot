@@ -242,6 +242,24 @@
       details);
   }
 
+  function setupCard() {
+    const items = data.setup || [];
+    const todo = items.filter(i => i.state === 'todo');
+    if (!todo.length) { return null; }
+    const ready = items.filter(i => i.state === 'ok').length;
+    const stateIcon = { ok: 'check', todo: 'alert', info: 'clock' };
+    return el('section', { class: 'card setup' },
+      el('header', {}, icon('list'), el('h2', {}, 'Getting ready'), el('span', { class: 'badge needs-review' }, todo.length + ' to do'), el('span', { class: 'spacer' }), el('span', { class: 'muted' }, ready + ' of ' + items.length + ' ready')),
+      el('p', { class: 'muted' }, 'ReleasePilot checks what a managed 2GP release needs. Nothing here changes your project or your orgs: the buttons only open files or copy a command for you to run yourself.'),
+      el('div', { class: 'chips', style: 'margin:10px 0 4px' }, items.filter(i => i.state === 'ok').map(i => chip('ok', 'check', null, i.title))),
+      items.filter(i => i.state !== 'ok').map(i => el('div', { class: 'setup-row ' + i.state,
+        title: i.title },
+        el('span', { class: 'setup-ic' }, icon(stateIcon[i.state] || 'circle')),
+        el('div', { class: 'setup-main' }, el('strong', {}, i.title), el('div', { class: 'muted' }, i.detail)),
+        el('div', { class: 'setup-actions' }, i.actions.map(a => el('button', { class: 'action secondary sm', onclick: () => post(a.kind === 'copyCmd' ? { type: 'copyCmd', id: a.id } : { type: 'openProject' }) },
+          icon(a.kind === 'copyCmd' ? 'file' : 'external'), a.label))))));
+  }
+
   function pipelineTab() {
     const steps = data.state.run.steps;
     const defs = data.definitions;
@@ -255,6 +273,7 @@
     const nextReason = next ? blockedReason(next, steps) : null;
     const nextState = next ? steps[next.id] : null;
     return el('div', {},
+      setupCard(),
       tiles([
         { k: 'Progress', v: passed + ' / ' + defs.length, s: 'steps complete', tone: passed === defs.length ? 'ok' : 'info' },
         { k: 'Needs attention', v: String(attention), s: failed ? failed + ' failed' : attention ? 'review required' : 'nothing waiting', tone: failed ? 'bad' : attention ? 'hold' : 'ok' },
@@ -554,10 +573,15 @@
   function analysisSection(q) {
     const a = q.analysis;
     const parts = [el('h2', {}, 'Static analysis')];
+    const aDef = data.definitions.find(d => d.id === 'analysis');
+    const aWhy = blockedReason(aDef, data.state.run.steps);
     parts.push(el('div', { class: 'toolbar' },
-      el('button', { class: 'action', disabled: !!data.busy, onclick: () => post({ type: 'run', stepId: 'analysis' }) }, a ? 'Rescan' : 'Run Code Analyzer'),
+      el('button', { class: 'action', disabled: !!aWhy, title: aWhy || 'Runs the pipeline Static Analysis step (counts as release evidence)', onclick: () => post({ type: 'run', stepId: 'analysis' }) }, icon('shield'), a && !a.adHoc ? 'Rescan' : 'Run pipeline analysis'),
+      el('button', { class: 'action secondary', disabled: !!data.busy || !(data.discovery && data.discovery.project), title: 'Scan the project now without the pipeline. Ad hoc: not release evidence.', onclick: () => post({ type: 'quickScan' }) }, icon('play'), 'Quick scan'),
       el('button', { class: 'action secondary', onclick: () => post({ type: 'exportSummary' }) }, 'Export quality summary...')));
-    if (!a) { parts.push(el('div', { class: 'empty' }, 'No scan yet. Source Ready must pass before the analyzer can run.')); return parts; }
+    if (aWhy && !a) { parts.push(el('p', { class: 'muted' }, 'Pipeline analysis is unavailable: ' + aWhy + ' You can still use Quick scan.')); }
+    if (!a) { parts.push(emptyState('No scan yet. Use Quick scan for an ad-hoc look, or run the pipeline analysis once Source Ready has passed.', 'shield')); return parts; }
+    if (a.adHoc) { parts.push(el('div', { class: 'banner info' }, icon('info'), el('div', {}, el('strong', {}, 'Ad-hoc scan. '), 'This quick scan is not release evidence and does not affect any gate. Run the pipeline analysis for results that count.'))); }
     if (a.outdated) { parts.push(el('div', { class: 'banner', role: 'alert' }, 'This scan is OUTDATED: the source changed after it ran. Rescan before relying on it.')); }
     if (a.warnings && a.warnings.length) { parts.push(el('div', { class: 'err', role: 'alert' }, el('strong', {}, 'The scan may be incomplete. '), 'Code Analyzer printed warnings:', el('pre', { class: 'log-line' }, a.warnings.slice(0, 12).join('\n')))); }
     const c = a.counts;

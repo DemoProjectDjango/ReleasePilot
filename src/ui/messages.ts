@@ -13,8 +13,9 @@ export type SettingKey = 'coverageTargetPercent' | 'logRetentionEntries' | 'step
 export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'run' | 'retry' | 'cancel'; stepId: StepId }
-  | { type: 'resume' | 'newRun' | 'showLogs' | 'refresh' | 'discover' | 'retrievePreview' | 'retrieveApply' | 'rerunFailed' | 'exportSummary' | 'refreshBuild' | 'promote' }
+  | { type: 'resume' | 'newRun' | 'showLogs' | 'refresh' | 'discover' | 'retrievePreview' | 'retrieveApply' | 'rerunFailed' | 'exportSummary' | 'refreshBuild' | 'promote' | 'quickScan' | 'openProject' }
   | { type: 'openFile'; key: string }
+  | { type: 'copyCmd'; id: string }
   | { type: 'overrideGate' | 'removeOverride'; gateId: string }
   | { type: 'qaMark'; envId: string; itemId: string; state: 'pass' | 'fail' }
   | { type: 'qaSignOff' | 'qaDelete' | 'qaOpen'; envId: string }
@@ -60,10 +61,14 @@ export function parseMessage(raw: unknown): WebviewMessage | undefined {
     case 'exportSummary':
     case 'refreshBuild':
     case 'promote':
+    case 'quickScan':
+    case 'openProject':
       return { type: m.type };
     case 'qaMark':
       return typeof m.envId === 'string' && ID_RE.test(m.envId) && typeof m.itemId === 'string' && /^c\d{1,3}$/.test(m.itemId) && (m.state === 'pass' || m.state === 'fail')
         ? { type: 'qaMark', envId: m.envId, itemId: m.itemId, state: m.state } : undefined;
+    case 'copyCmd':
+      return typeof m.id === 'string' && /^[a-z-]{1,40}$/.test(m.id) ? { type: 'copyCmd', id: m.id } : undefined;
     case 'overrideGate':
     case 'removeOverride':
       return typeof m.gateId === 'string' && /^[a-z0-9-]{1,40}$/.test(m.gateId) ? { type: m.type, gateId: m.gateId } : undefined;

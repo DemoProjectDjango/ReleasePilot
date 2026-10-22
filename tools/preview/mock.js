@@ -84,8 +84,19 @@
     ['AvoidDebugStatements', 'pmd', 4, 'Low', 'force-app/main/default/classes/Helper.cls', 9, 'Avoid debug statements.']
   ].map(([rule, engine, severity, severityLabel, file, line, message], i) => ({ key: rule + i, rule, engine, severity, severityLabel, file, line, column: 3, message, tags: [], resources: [], suggestions: [], triaged: i === 3 }));
 
+  const setupAll = [
+    { id: 'project', title: 'Salesforce DX project', state: 'ok', detail: 'sfdx-project.json found.', actions: [] },
+    { id: 'cli', title: 'Salesforce CLI', state: 'ok', detail: '@salesforce/cli/2.150.6', actions: [] },
+    { id: 'analyzer', title: 'Code Analyzer v5', state: 'ok', detail: 'code-analyzer 5.15.0', actions: [] },
+    { id: 'git', title: 'Git repository', state: 'ok', detail: 'On branch main.', actions: [] },
+    { id: 'devhub', title: 'Dev Hub selected', state: scenario === 'failed-start' ? 'todo' : 'ok', detail: scenario === 'failed-start' ? 'Choose your Dev Hub in the "Dev Hub" list at the top of the page.' : 'acme-devhub (00D5g000008XyZaEAK)', actions: [] },
+    { id: 'package', title: 'Package declared in sfdx-project.json', state: scenario === 'failed-start' ? 'todo' : 'ok', detail: scenario === 'failed-start' ? 'No package directory has a "package" entry, so there is nothing to release. ReleasePilot manages managed second-generation packages: add "package" and "versionNumber" to a packageDirectories entry and map the package name to its 0Ho ID in packageAliases. If the package does not exist yet, create it once (this makes a permanent package in your Dev Hub, which ReleasePilot never does for you).' : 'MassDelete (0Ho5g000000ABCDCA0) in force-app.',
+      actions: scenario === 'failed-start' ? [{ kind: 'openProject', label: 'Open sfdx-project.json' }, { kind: 'copyCmd', id: 'create-package', label: 'Copy create-package command' }] : [] },
+    { id: 'ownership', title: 'Dev Hub owns the package', state: scenario === 'failed-start' ? 'info' : 'ok', detail: scenario === 'failed-start' ? 'Waiting for a Dev Hub and a declared package.' : 'MassDelete (0Ho5g000000ABCDCA0).', actions: [] },
+    { id: 'validation', title: 'Validation org (needed for tests)', state: 'ok', detail: 'rp-qa-1', actions: [] }
+  ];
   const state = {
-    type: 'state', busy: scenario === 'busy-project' ? undefined : undefined, notice: scenario === 'failed-start' ? { level: 'error', text: 'Discovery runs external tools and requires a trusted workspace.' } : undefined,
+    type: 'state', setup: setupAll, busy: scenario === 'busy-project' ? undefined : undefined, notice: scenario === 'failed-start' ? { level: 'error', text: 'Discovery runs external tools and requires a trusted workspace.' } : undefined,
     cliAvailable: true, selectedRoot: 'D:\\Product\\Mass_Delete',
     workspace: { trusted: true, folders: [{ name: 'Mass_Delete', path: 'D:\\Product\\Mass_Delete' }] },
     definitions: defs,

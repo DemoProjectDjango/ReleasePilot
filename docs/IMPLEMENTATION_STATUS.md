@@ -14,6 +14,15 @@
 **Not yet verified anywhere (needs a supervised pilot):** every command that changes a Salesforce environment: `apex run test`, `project deploy start`, `package version create`, `org create scratch`, `package install`, `org assign permset`, `apex run`, `org delete scratch`, `package version promote`. The extension has also never been launched in a VS Code window. Until those are done, the product should be treated as feature-complete but not field-proven.
 
 
+## Post-MVP refinements (after Slice 6)
+
+- **Dashboard redesign** (sidebar, context bar, tiles, cards, stepper, themes, responsive layout) with a headless preview harness in `tools/preview`. Verified by rendered screenshots (dark, light, narrow); not yet seen inside a real VS Code window.
+- **Preflight failure detail:** every failed check is listed in the step panel, not only the first.
+- **Getting-ready checklist** (`src/discovery/setup.ts`): advisory list of what a managed 2GP release needs, with open-file and copy-command actions only; commands are built on the host from a fixed list, never from webview text.
+- **Quick scan** (`src/testing/analysisView.ts`): Code Analyzer on any DX project without a Dev Hub or package. Stored separately from pipeline evidence, flagged ad hoc, and ignored by every release gate. Verified for real on a 498-finding project (35 s, no warnings, project untouched).
+- Defect fixed: the header showed the literal text "null" (`replaceChildren(null)`).
+- Tests: 217 pass by default (11 new for setup, commands, scan selection and message validation).
+
 ## Slice 6 — Release Readiness and Controlled Promotion
 
 **State:** Implemented. All Salesforce-derived gates are verified against your real Dev Hub, read-only. **No version was promoted during development, and the promote command was never run against any org**: promotion is tested with a mocked CLI only. All six slices are now built; see "Overall status" below for what remains unverified.

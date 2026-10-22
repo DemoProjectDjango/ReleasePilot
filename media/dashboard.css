@@ -253,3 +253,15 @@ pre.log-line { background: var(--surface-2); border: 1px solid var(--line); bord
 .toolbar input[type='search'] { min-width: 240px; }
 .ctx.missing select { border-color: var(--hold); box-shadow: 0 0 0 1px color-mix(in srgb, var(--hold) 55%, transparent); }
 .ctx.missing > span { color: var(--hold); }
+
+/* ---- setup checklist ---------------------------------------------------- */
+.setup { border-color: color-mix(in srgb, var(--hold) 40%, var(--line)); }
+.setup > header h2 { margin: 0; }
+.setup-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 11px 0; border-top: 1px solid var(--line); }
+.setup-row:first-of-type { border-top: 0; }
+.setup-ic { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 14px; color: var(--tone); background: color-mix(in srgb, var(--tone) 16%, transparent); --tone: var(--muted); }
+.setup-row.ok .setup-ic { --tone: var(--ok); } .setup-row.todo .setup-ic { --tone: var(--hold); }
+.setup-row.ok .muted { opacity: 0.8; }
+.setup-main > .muted { margin-top: 1px; max-width: 78ch; }
+.setup-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 900px) { .setup-row { grid-template-columns: 26px minmax(0, 1fr); } .setup-actions { grid-column: 2; justify-content: flex-start; } }
