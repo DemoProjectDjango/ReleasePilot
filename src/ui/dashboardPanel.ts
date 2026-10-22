@@ -14,6 +14,7 @@ export interface DashboardHost {
 export class DashboardPanel {
   private static current: DashboardPanel | undefined;
   private readonly disposables: vscode.Disposable[] = [];
+  private unsubscribe: (() => void) | undefined;
 
   static show(host: DashboardHost): void {
     if (DashboardPanel.current) {
@@ -27,6 +28,17 @@ export class DashboardPanel {
       localResourceRoots: [mediaRoot]
     });
     DashboardPanel.current = new DashboardPanel(panel, host);
+  }
+
+  /** The active project (and so its engine) changed: listen to the new engine. */
+  static rebind(): void {
+    DashboardPanel.current?.bind();
+    DashboardPanel.current?.post();
+  }
+
+  private bind(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = this.host.engine.onChange(() => this.post());
   }
 
   static refresh(): void {
@@ -47,7 +59,8 @@ export class DashboardPanel {
       await host.handleAction(msg);
       this.post();
     }, null, this.disposables);
-    this.disposables.push({ dispose: host.engine.onChange(() => this.post()) });
+    this.bind();
+    this.disposables.push({ dispose: () => this.unsubscribe?.() });
     panel.onDidDispose(() => {
       DashboardPanel.current = undefined;
       this.disposables.forEach(d => d.dispose());

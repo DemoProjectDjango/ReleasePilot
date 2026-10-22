@@ -37,8 +37,18 @@ export class PipelineTree implements vscode.TreeDataProvider<StepItem> {
   private readonly emitter = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.emitter.event;
 
-  constructor(private readonly engine: WorkflowEngine) {
-    engine.onChange(() => this.emitter.fire());
+  private unsubscribe: (() => void) | undefined;
+
+  constructor(private engine: WorkflowEngine) {
+    this.unsubscribe = engine.onChange(() => this.emitter.fire());
+  }
+
+  /** Switch to another project's engine. */
+  bind(engine: WorkflowEngine): void {
+    this.unsubscribe?.();
+    this.engine = engine;
+    this.unsubscribe = engine.onChange(() => this.emitter.fire());
+    this.emitter.fire();
   }
 
   refresh(): void {

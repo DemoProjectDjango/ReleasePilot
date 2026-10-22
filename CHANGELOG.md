@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 ### Added
+- Project switcher: pick any open folder, a recent project, or browse to any Salesforce DX project. State, reports, QA and release history are stored per project; projects outside the workspace need an explicit one-time trust confirmation. Existing single-project state is adopted for the first workspace folder.
+- Extension-host integration test (stubbed VS Code API) covering activation and project switching.
 - Getting-ready checklist (spec FR-35, advisory only) with copy-command and open-file buttons; Quick scan for ad-hoc Code Analyzer runs that never count as release evidence.
 - Dashboard redesign: sidebar navigation with status dots, sticky project/org context bar, stat tiles per page, card sections, stepper pipeline with auto-opening failed steps, pills and inline icons, grouped settings with switches, structured log view, responsive layout, theme-aware light/dark. Fixes stray "null" text in the header.
 - tools/preview: headless screenshot harness for the dashboard.

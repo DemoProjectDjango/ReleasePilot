@@ -63,6 +63,8 @@ If the icon is missing, make sure you pressed F5 in the ReleasePilot window and 
 
 ## 4. A first, read-only walkthrough
 
+**Switching projects.** Use the **Project** list in the top bar. It shows the folders open in VS Code, your recent projects, and **Browse for a project folder…**, which lets you pick any Salesforce DX project on disk without reopening VS Code. Each project keeps its own run state, reports, QA records and release history, so switching never mixes them. A project outside the open VS Code workspace is not covered by Workspace Trust, so the first time you open one ReleasePilot asks you to confirm that you trust it (it will run the Salesforce CLI, Git and the project's own tooling there); the choice is remembered. You cannot switch while an operation is running.
+
 The **Pipeline** page starts with a **Getting ready** checklist. It tells you what is still missing (CLI, Code Analyzer, Git, a Dev Hub, a package declared in `sfdx-project.json`, package ownership) and offers buttons that only *open a file* or *copy a command* for you to run yourself. Nothing is created for you. If your project has no package yet, ReleasePilot cannot release it: that is expected, and the checklist says what to add.
 
 **Want to try the Code Analyzer on any DX project first?** On the **Quality** page use **Quick scan**. It needs no Dev Hub or package, only reads your source, and is clearly marked *ad hoc*: it is never release evidence and never affects a gate.

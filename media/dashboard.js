@@ -763,13 +763,20 @@
   }
 
   function selectors() {
-    const folders = data.workspace.folders;
     const d = data.discovery || {};
     const orgs = d.orgs || [];
-    const proj = el('select', { 'aria-label': 'Project', disabled: !!data.busy }, folders.length
-      ? folders.map(f => el('option', { value: f.path, title: f.path, selected: f.path === data.selectedRoot }, f.name))
-      : [el('option', {}, 'No folder open')]);
-    proj.addEventListener('change', () => post({ type: 'selectFolder', path: proj.value }));
+    const items = (data.projects && data.projects.items) || [];
+    const opt = c => el('option', { value: c.path, title: c.path, selected: c.path === data.selectedRoot }, c.label);
+    const open = items.filter(c => c.source === 'workspace');
+    const recent = items.filter(c => c.source === 'recent');
+    const proj = el('select', { 'aria-label': 'Project', disabled: !!data.busy, title: data.selectedRoot || '' },
+      !items.length ? el('option', { value: '' }, 'No project open') : null,
+      open.length ? el('optgroup', { label: 'Open in VS Code' }, open.map(opt)) : null,
+      recent.length ? el('optgroup', { label: 'Recent projects' }, recent.map(opt)) : null,
+      el('optgroup', { label: 'Other' }, el('option', { value: '__browse__' }, 'Browse for a project folder\u2026')));
+    proj.addEventListener('change', () => {
+      if (proj.value === '__browse__') { post({ type: 'browseProject' }); render(); } else if (proj.value) { post({ type: 'selectFolder', path: proj.value }); }
+    });
     return [el('label', { class: 'ctx' }, el('span', {}, icon('folder'), 'Project'), proj),
       orgSelect('Dev Hub', d.devHub, orgs.filter(o => o.isDevHub), 'selectDevHub', 'cloud', true),
       orgSelect('Development org', d.devOrg, orgs.filter(o => !o.isDevHub || !o.isScratch), 'selectDevOrg', 'branch'),

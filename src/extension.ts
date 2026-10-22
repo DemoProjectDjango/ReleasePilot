@@ -37,43 +37,49 @@ import { buildSummaryMarkdown } from './testing/summary';
 import { DashboardPanel } from './ui/dashboardPanel';
 import { WebviewMessage } from './ui/messages';
 import { PipelineTree, StepItem } from './ui/pipelineTree';
+import { RecentProject, addRecent, projectChoices, projectKey, samePath } from './ui/projects';
 
 const FIX_SCHEME = 'releasepilot-fix';
 
 export function activate(context: vscode.ExtensionContext): void {
   const cfg = () => vscode.workspace.getConfiguration('releasepilot');
-  const storageDir = (context.storageUri ?? context.globalStorageUri).fsPath;
-  const reportsDir = path.join(storageDir, 'reports');
-  const store = new FileStateStore(path.join(storageDir, 'workflow-state.json'));
-  const reports = new ReportWriter(reportsDir);
-  const quality = new QualityStore(path.join(storageDir, 'quality-state.json'));
-  const triage = new TriageStore(path.join(storageDir, 'triage.json'));
-  const packaging = new PackagingStore(path.join(storageDir, 'packaging.json'));
-  const qa = new QaStore(path.join(storageDir, 'qa.json'));
-  const release = new ReleaseStore(path.join(storageDir, 'release.json'));
-  /** One-shot approval captured from a typed confirmation; it is consumed by the promotion step. */
-  let approval: ApprovalToken | undefined;
-
+  const baseStorage = (context.storageUri ?? context.globalStorageUri).fsPath;
   const output = vscode.window.createOutputChannel('ReleasePilot');
   context.subscriptions.push(output);
 
-  const persisted = store.load();
-  const logger = new Logger(cfg().get<number>('logRetentionEntries', 2000), persisted?.logs ?? []);
-  logger.addSink(e => output.appendLine(`${e.at} [${e.level.toUpperCase()}] ${e.scope}: ${e.message}`));
-
-  // Adapters: every external process goes through the runner (shell:false, argument arrays).
+  // Adapters are shared. Everything that holds per-project state lives in a "session" that is rebuilt (with its own
+  // storage folder) whenever the active project changes, so two projects can never mix run state, reports or approvals.
   const runner = new NodeProcessRunner();
   const history = new CommandHistory();
   const sf = new SfCli(runner, history, resolveSfLauncher());
   const git = new GitAdapter(runner, history);
-  const discovery = new DiscoveryService(sf, git);
-  const retrieval = new RetrievalService(sf, git);
+
+  let reportsDir = '';
+  let reports!: ReportWriter;
+  let quality!: QualityStore;
+  let triage!: TriageStore;
+  let packaging!: PackagingStore;
+  let qa!: QaStore;
+  let release!: ReleaseStore;
+  let logger!: Logger;
+  let discovery!: DiscoveryService;
+  let retrieval!: RetrievalService;
+  let engine!: WorkflowEngine;
+  /** One-shot approval captured from a typed confirmation; it is consumed by the promotion step. */
+  let approval: ApprovalToken | undefined;
 
   const folders = () => (vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath);
-  const getRoot = (): string | undefined => {
+  const approvedProjects = () => context.globalState.get<string[]>('releasepilot.approvedProjects', []);
+  /** The project chosen last time, if it still exists and is either an open workspace folder or one you explicitly trusted. */
+  const initialRoot = (): string | undefined => {
     const saved = context.workspaceState.get<string>('releasepilot.root');
-    return saved && folders().includes(saved) ? saved : folders()[0];
+    if (saved && fs.existsSync(saved) && (folders().some(f => samePath(f, saved)) || approvedProjects().some(p => samePath(p, saved)))) {
+      return saved;
+    }
+    return folders()[0];
   };
+  let activeRoot: string | undefined = initialRoot();
+  const getRoot = (): string | undefined => activeRoot;
   const trusted = () => vscode.workspace.isTrusted;
 
   const qualitySettings = (): QualitySettings => ({
@@ -143,39 +149,88 @@ export function activate(context: vscode.ExtensionContext): void {
     return key ? { key } : undefined;
   };
 
-  const engine: WorkflowEngine = new WorkflowEngine({
-    store,
-    logger,
-    executors: {
-      ...createExecutors({ discovery, reports, getRoot, allowDirtySource: () => cfg().get<boolean>('allowDirtySource', false) }),
-      ...createQualityExecutors({
-        sf, runner, discovery, reports, reportsDir, quality, triage, getRoot,
-        settings: qualitySettings, git: root => git.snapshot(root), confirm: confirmRemote
-      }),
-      ...createPackagingExecutors({
-        sf, discovery, reports, store: packaging, quality, getRoot, git: root => git.snapshot(root),
-        allowDirty: () => cfg().get<boolean>('allowDirtySource', false),
-        stepStatus: (id: StepId): StepStatus => engine.getState().run.steps[id].status,
-        confirm: confirmRemote, askInstallationKey, settings: packagingSettings, sleep: abortableSleep
-      }),
-      ...createQaExecutors({
-        sf, discovery, reports, qa, packaging, getRoot, git: root => git.snapshot(root), settings: qaSettings,
-        confirm: confirmRemote, askKey: askQaKey, sleep: abortableSleep
-      }),
-      ...createReleaseExecutors({
-        sf, discovery, reports, reportsDir, quality, packaging, qa, release, triage, getRoot, git: root => git.snapshot(root),
-        steps: () => engine.getState().run.steps,
-        settings: () => ({ severityGate: qualitySettings().severityGate, coverageTarget: qualitySettings().coverageTargetPercent, allowDirty: cfg().get<boolean>('allowDirtySource', false) }),
-        takeApproval: () => { const a = approval; approval = undefined; return a; }
-      })
-    },
-    canExecute: () => trusted() ? { allowed: true } : { allowed: false, reason: 'Running workflow steps requires a trusted workspace.' },
-    stepTimeoutMs: cfg().get<number>('stepTimeoutMinutes', 60) * 60_000
-  });
-  logger.log('info', 'extension', `ReleasePilot activated. Salesforce CLI ${sf.available ? 'found' : 'NOT found'}.`);
+  const LEGACY_FILES = ['workflow-state.json', 'quality-state.json', 'triage.json', 'packaging.json', 'qa.json', 'release.json'];
+  /** Earlier versions kept one set of files per workspace; adopt them for the first workspace folder, once. */
+  const migrateLegacy = (dir: string, root: string) => {
+    try {
+      const first = folders()[0];
+      if (fs.existsSync(dir) || !first || !samePath(first, root) || !fs.existsSync(path.join(baseStorage, LEGACY_FILES[0]))) {
+        return;
+      }
+      fs.mkdirSync(dir, { recursive: true });
+      for (const f of LEGACY_FILES) {
+        const src = path.join(baseStorage, f);
+        if (fs.existsSync(src)) {
+          fs.copyFileSync(src, path.join(dir, f));
+        }
+      }
+    } catch {
+      // best effort: a failed migration just starts the project fresh
+    }
+  };
 
-  const tree = new PipelineTree(engine);
-  context.subscriptions.push(vscode.window.registerTreeDataProvider('releasepilot.pipeline', tree));
+  let tree: PipelineTree | undefined;
+
+  const openSession = (root: string | undefined): void => {
+    const dir = path.join(baseStorage, 'projects', root ? projectKey(root) : '_none');
+    if (root) {
+      migrateLegacy(dir, root);
+    }
+    reportsDir = path.join(dir, 'reports');
+    const store = new FileStateStore(path.join(dir, 'workflow-state.json'));
+    reports = new ReportWriter(reportsDir);
+    quality = new QualityStore(path.join(dir, 'quality-state.json'));
+    triage = new TriageStore(path.join(dir, 'triage.json'));
+    packaging = new PackagingStore(path.join(dir, 'packaging.json'));
+    qa = new QaStore(path.join(dir, 'qa.json'));
+    release = new ReleaseStore(path.join(dir, 'release.json'));
+    approval = undefined;
+    const persisted = store.load();
+    logger = new Logger(cfg().get<number>('logRetentionEntries', 2000), persisted?.logs ?? []);
+    logger.addSink(e => output.appendLine(`${e.at} [${e.level.toUpperCase()}] ${e.scope}: ${e.message}`));
+    discovery = new DiscoveryService(sf, git);
+    retrieval = new RetrievalService(sf, git);
+
+    const self: WorkflowEngine = new WorkflowEngine({
+      store,
+      logger,
+      executors: {
+        ...createExecutors({ discovery, reports, getRoot, allowDirtySource: () => cfg().get<boolean>('allowDirtySource', false) }),
+        ...createQualityExecutors({
+          sf, runner, discovery, reports, reportsDir, quality, triage, getRoot,
+          settings: qualitySettings, git: r => git.snapshot(r), confirm: confirmRemote
+        }),
+        ...createPackagingExecutors({
+          sf, discovery, reports, store: packaging, quality, getRoot, git: r => git.snapshot(r),
+          allowDirty: () => cfg().get<boolean>('allowDirtySource', false),
+          stepStatus: (id: StepId): StepStatus => self.getState().run.steps[id].status,
+          confirm: confirmRemote, askInstallationKey, settings: packagingSettings, sleep: abortableSleep
+        }),
+        ...createQaExecutors({
+          sf, discovery, reports, qa, packaging, getRoot, git: r => git.snapshot(r), settings: qaSettings,
+          confirm: confirmRemote, askKey: askQaKey, sleep: abortableSleep
+        }),
+        ...createReleaseExecutors({
+          sf, discovery, reports, reportsDir, quality, packaging, qa, release, triage, getRoot, git: r => git.snapshot(r),
+          steps: () => self.getState().run.steps,
+          settings: () => ({ severityGate: qualitySettings().severityGate, coverageTarget: qualitySettings().coverageTargetPercent, allowDirty: cfg().get<boolean>('allowDirtySource', false) }),
+          takeApproval: () => { const a = approval; approval = undefined; return a; }
+        })
+      },
+      canExecute: () => trusted() ? { allowed: true } : { allowed: false, reason: 'Running workflow steps requires a trusted workspace.' },
+      stepTimeoutMs: cfg().get<number>('stepTimeoutMinutes', 60) * 60_000
+    });
+    engine = self;
+    logger.log('info', 'extension', `ReleasePilot session for ${root ?? '(no project)'}. Salesforce CLI ${sf.available ? 'found' : 'NOT found'}.`);
+
+    if (tree) {
+      tree.bind(engine);
+    } else {
+      tree = new PipelineTree(engine);
+      context.subscriptions.push(vscode.window.registerTreeDataProvider('releasepilot.pipeline', tree));
+    }
+  };
+  openSession(activeRoot);
 
   // Read-only virtual documents used to show the proposed side of a fix diff.
   const proposed = new Map<string, string>();
@@ -187,7 +242,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let busy: string | undefined;
   let notice: { level: 'info' | 'error'; text: string } | undefined;
   let lastFingerprint: string | undefined;
-  const refreshUi = () => { tree.refresh(); DashboardPanel.refresh(); };
+  const refreshUi = () => { tree?.refresh(); DashboardPanel.refresh(); };
 
   const withBusy = async <T>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
     if (busy) {
@@ -274,6 +329,7 @@ export function activate(context: vscode.ExtensionContext): void {
     busy,
     notice,
     selectedRoot: getRoot(),
+    projects: { items: projectChoices(folders(), context.globalState.get<RecentProject[]>('releasepilot.recent', []), p => fs.existsSync(p)) },
     cliAvailable: sf.available
   });
 
@@ -458,6 +514,63 @@ export function activate(context: vscode.ExtensionContext): void {
       engine.addArtifact(reports.write('apex-rerun', `Rerun of ${failedNames.length} failed test(s)`, { org: label, failedBefore: failedNames, result: { total: rerun.total, passed: rerun.passed, failed: rerun.failed } }));
       notice = { level: rerun.failed ? 'error' : 'info', text: `Rerun finished: ${rerun.passed}/${rerun.total} passed. Run the Pre-package Tests step again for a full, gate-eligible result.` };
     });
+  };
+
+  const switchProject = async (target: string): Promise<void> => {
+    if (busy || Object.values(engine.getState().run.steps).some(st => st.status === 'running')) {
+      notice = { level: 'error', text: 'Finish or cancel the running operation before switching projects.' };
+      refreshUi();
+      return;
+    }
+    let isDir = false;
+    try {
+      isDir = fs.statSync(target).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) {
+      notice = { level: 'error', text: `${target} no longer exists.` };
+      refreshUi();
+      return;
+    }
+    const approved = approvedProjects();
+    if (!folders().some(f => samePath(f, target)) && !approved.some(p => samePath(p, target))) {
+      const pick = await vscode.window.showWarningMessage(`Work in ${target}?`, {
+        modal: true,
+        detail: "This folder is outside your open VS Code workspace, so Workspace Trust does not cover it. ReleasePilot will read its files and run the Salesforce CLI, Git and the project's own tooling (for example Jest) inside it. Only continue for a project you trust."
+      }, 'Trust this folder');
+      if (pick !== 'Trust this folder') {
+        return;
+      }
+      await context.globalState.update('releasepilot.approvedProjects', [...approved, target]);
+    }
+    activeRoot = target;
+    await context.workspaceState.update('releasepilot.root', target);
+    await context.globalState.update('releasepilot.recent', addRecent(context.globalState.get<RecentProject[]>('releasepilot.recent', []), target, new Date()));
+    openSession(target);
+    lastFingerprint = undefined;
+    notice = undefined;
+    DashboardPanel.rebind();
+    refreshUi();
+    logger.log('info', 'extension', `Switched project to ${target}`);
+    await runDiscovery();
+  };
+
+  const browseProject = async (): Promise<void> => {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFolders: true, canSelectFiles: false, canSelectMany: false, openLabel: 'Open project',
+      title: 'Choose the root folder of a Salesforce DX project', defaultUri: activeRoot ? vscode.Uri.file(path.dirname(activeRoot)) : undefined
+    });
+    const dir = picked?.[0]?.fsPath;
+    if (!dir) {
+      return;
+    }
+    if (!fs.existsSync(path.join(dir, 'sfdx-project.json'))) {
+      notice = { level: 'error', text: `"${dir}" is not a Salesforce DX project (no sfdx-project.json). Choose the project's root folder.` };
+      refreshUi();
+      return;
+    }
+    await switchProject(dir);
   };
 
   const stepOfKind = (k: 'fresh-install' | 'upgrade'): StepId => (k === 'upgrade' ? 'upgrade-qa' : 'clean-install-qa');
@@ -671,12 +784,15 @@ export function activate(context: vscode.ExtensionContext): void {
       case 'discover':
         await runDiscovery();
         break;
-      case 'selectFolder':
-        if (folders().includes(msg.path)) {
-          await context.workspaceState.update('releasepilot.root', msg.path);
-          engine.markStale('preflight', 'the selected project changed');
-          await runDiscovery();
+      case 'selectFolder': {
+        const choice = projectChoices(folders(), context.globalState.get<RecentProject[]>('releasepilot.recent', []), p => fs.existsSync(p)).find(c => samePath(c.path, msg.path));
+        if (choice && !(activeRoot && samePath(activeRoot, choice.path))) {
+          await switchProject(choice.path);
         }
+        break;
+      }
+      case 'browseProject':
+        await browseProject();
         break;
       case 'selectDevHub':
       case 'selectDevOrg':
@@ -876,7 +992,7 @@ export function activate(context: vscode.ExtensionContext): void {
     refreshUi();
   };
 
-  const host = { extensionUri: context.extensionUri, engine, handleAction, extra: view };
+  const host = { extensionUri: context.extensionUri, get engine() { return engine; }, handleAction, extra: view };
   const stepOf = (item?: StepItem): StepId | undefined => item?.def.id;
 
   context.subscriptions.push(

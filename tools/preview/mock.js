@@ -98,6 +98,7 @@
   const state = {
     type: 'state', setup: setupAll, busy: scenario === 'busy-project' ? undefined : undefined, notice: scenario === 'failed-start' ? { level: 'error', text: 'Discovery runs external tools and requires a trusted workspace.' } : undefined,
     cliAvailable: true, selectedRoot: 'D:\\Product\\Mass_Delete',
+    projects: { items: [{ path: 'D:\\Product\\Mass_Delete', name: 'Mass_Delete', label: 'Mass_Delete', source: 'workspace' }, { path: 'D:\\Work\\Billing\\app', name: 'app', label: 'app (Billing)', source: 'recent' }, { path: 'D:\\Work\\Orders\\app', name: 'app', label: 'app (Orders)', source: 'recent' }] },
     workspace: { trusted: true, folders: [{ name: 'Mass_Delete', path: 'D:\\Product\\Mass_Delete' }] },
     definitions: defs,
     state: { schemaVersion: 1, run: { id: '492608a7-1111-2222-3333-444444444444', startedAt: iso(60), steps }, history: [{ id: 'aa11bb22cc33', startedAt: iso(9000), endedAt: iso(8900), passedSteps: ['preflight', 'source', 'analysis'], outcome: { failed: 1 } }],

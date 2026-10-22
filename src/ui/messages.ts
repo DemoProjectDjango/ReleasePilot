@@ -13,7 +13,7 @@ export type SettingKey = 'coverageTargetPercent' | 'logRetentionEntries' | 'step
 export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'run' | 'retry' | 'cancel'; stepId: StepId }
-  | { type: 'resume' | 'newRun' | 'showLogs' | 'refresh' | 'discover' | 'retrievePreview' | 'retrieveApply' | 'rerunFailed' | 'exportSummary' | 'refreshBuild' | 'promote' | 'quickScan' | 'openProject' }
+  | { type: 'resume' | 'newRun' | 'showLogs' | 'refresh' | 'discover' | 'retrievePreview' | 'retrieveApply' | 'rerunFailed' | 'exportSummary' | 'refreshBuild' | 'promote' | 'quickScan' | 'openProject' | 'browseProject' }
   | { type: 'openFile'; key: string }
   | { type: 'copyCmd'; id: string }
   | { type: 'overrideGate' | 'removeOverride'; gateId: string }
@@ -63,6 +63,7 @@ export function parseMessage(raw: unknown): WebviewMessage | undefined {
     case 'promote':
     case 'quickScan':
     case 'openProject':
+    case 'browseProject':
       return { type: m.type };
     case 'qaMark':
       return typeof m.envId === 'string' && ID_RE.test(m.envId) && typeof m.itemId === 'string' && /^c\d{1,3}$/.test(m.itemId) && (m.state === 'pass' || m.state === 'fail')
